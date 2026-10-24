@@ -1,0 +1,35 @@
+{
+  "name": "spacetime-clob-prediction-market",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "server:build": "\"C:\\Users\\OPBos\\AppData\\Local\\SpacetimeDB\\spacetime.exe\" build --module-path spacetimedb",
+    "server:publish": "\"C:\\Users\\OPBos\\AppData\\Local\\SpacetimeDB\\spacetime.exe\" publish --module-path spacetimedb --server local clob-market --delete-data=always --yes",
+    "server:publish:cloud": "\"C:\\Users\\OPBos\\AppData\\Local\\SpacetimeDB\\spacetime.exe\" publish --module-path spacetimedb --server maincloud clob-market --yes",
+    "spacetime:generate": "\"C:\\Users\\OPBos\\AppData\\Local\\SpacetimeDB\\spacetime.exe\" generate --lang typescript --out-dir src/module_bindings --module-path spacetimedb --yes"
+  },
+  "dependencies": {
+    "@types/canvas-confetti": "^1.9.0",
+    "canvas-confetti": "^1.9.4",
+    "clsx": "^2.1.1",
+    "lucide-react": "^1.61.0",
+    "qrcode.react": "^4.2.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "spacetimedb": "2.13.*",
+    "tailwind-merge": "^3.7.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.3",
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "@vitejs/plugin-react": "^5.0.2",
+    "tailwindcss": "^4.3.3",
+    "typescript": "~5.6.2",
+    "vite": "^7.1.5"
+  }
+}
