@@ -1,0 +1,36 @@
+{
+  "group_id": "5da8df64-780f-4cc4-87bc-d56423599ecb",
+  "states": [
+    {
+      "character": {
+        "id": "367dd720-d2b1-458f-a1c8-ccbe6414a04f",
+        "name": "Idle",
+        "prompt": "Man in a black suit and tie with a serious face top down 2d pixel art style",
+        "size": {
+          "width": 32,
+          "height": 32
+        },
+        "template_id": "mannequin",
+        "directions": 8,
+        "view": "high top-down",
+        "created_at": "2026-10-24T19:49:40.381271+00:00"
+      },
+      "folder": "Idle",
+      "frames": {
+        "rotations": {
+          "south": "Idle/rotations/south.png",
+          "south-east": "Idle/rotations/south-east.png",
+          "east": "Idle/rotations/east.png",
+          "north-east": "Idle/rotations/north-east.png",
+          "north": "Idle/rotations/north.png",
+          "north-west": "Idle/rotations/north-west.png",
+          "west": "Idle/rotations/west.png",
+          "south-west": "Idle/rotations/south-west.png"
+        },
+        "animations": {}
+      }
+    }
+  ],
+  "export_version": "3.1",
+  "export_date": "2026-10-24T19:59:30.546733"
+}

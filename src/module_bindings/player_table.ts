@@ -14,5 +14,8 @@ export default __t.row({
   identity: __t.identity().primaryKey(),
   username: __t.string(),
   cashBalance: __t.u64().name("cash_balance"),
+  x: __t.i32(),
+  y: __t.i32(),
+  direction: __t.string(),
   createdAt: __t.timestamp().name("created_at"),
 });

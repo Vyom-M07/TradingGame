@@ -1,21 +1,17 @@
 import { useState, useMemo, useEffect, useRef } from 'react';
 import { useSpacetimeDB, useTable, useReducer } from 'spacetimedb/react';
 import { tables, reducers } from './module_bindings';
-import { Lobby } from './module_bindings/types';
-import { Navbar } from './components/Navbar';
-import { MarketBanner } from './components/MarketBanner';
-import { ClassroomClues } from './components/ClassroomClues';
-import { OrderBook } from './components/OrderBook';
-import { TradeTicket } from './components/TradeTicket';
-import { RecentTrades } from './components/RecentTrades';
-import { Portfolio } from './components/Portfolio';
-import { CreateMarketModal } from './components/CreateMarketModal';
+import { PhaserGame } from './game/PhaserGame';
+import { PlayerData } from './game/TradingPitScene';
+import { TradingPitOverlay } from './components/TradingPitOverlay';
+import { TopArcadeBar } from './components/TopArcadeBar';
 import { LobbyModal } from './components/LobbyModal';
+import { InstructorModal } from './components/InstructorModal';
 
 export default function App() {
   const { isActive: connected, identity: myIdentity } = useSpacetimeDB();
 
-  // Reactive SpacetimeDB table subscriptions
+  // SpacetimeDB table subscriptions
   const [markets] = useTable(tables.market);
   const [orders] = useTable(tables.order);
   const [players] = useTable(tables.player);
@@ -24,16 +20,29 @@ export default function App() {
   const [clues] = useTable(tables.clue);
   const [lobbies] = useTable(tables.lobby);
 
-  const optimalBotTickReducer = useReducer(reducers.optimalBotTick);
+  // SpacetimeDB reducers
+  const movePlayerReducer = useReducer(reducers.movePlayer);
+  const placeOrderReducer = useReducer(reducers.placeOrder);
+  const cancelOrderReducer = useReducer(reducers.cancelOrder);
+  const createLobbyReducer = useReducer(reducers.createLobby);
   const joinLobbyReducer = useReducer(reducers.joinLobby);
+  const setUsernameReducer = useReducer(reducers.setUsername);
+  const revealClueReducer = useReducer(reducers.revealClue);
+  const clearCluesReducer = useReducer(reducers.clearClues);
+  const resolveMarketReducer = useReducer(reducers.resolveMarket);
+  const resetMarketReducer = useReducer(reducers.resetMarket);
+  const resetLobbyBalancesReducer = useReducer(reducers.resetLobbyBalances);
+  const optimalBotTickReducer = useReducer(reducers.optimalBotTick);
 
-  const [selectedMarketId, setSelectedMarketId] = useState<bigint | null>(null);
-  const [selectedPrice, setSelectedPrice] = useState<{ price: number; side: 'BID' | 'ASK' } | null>(null);
-  const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
+  // UI Modal & Overlay States
+  const [isPitOverlayOpen, setIsPitOverlayOpen] = useState(false);
+  const [isInsidePit, setIsInsidePit] = useState(false);
   const [isLobbyModalOpen, setIsLobbyModalOpen] = useState(false);
+  const [isInstructorModalOpen, setIsInstructorModalOpen] = useState(false);
 
-  // Active Lobby State & URL Parameter Handling (?lobby=CAL13)
+  // Active Lobby State & URL Parameter (?lobby=CAL13)
   const [selectedLobbyCode, setSelectedLobbyCode] = useState<string | null>(null);
+  const [selectedMarketId, setSelectedMarketId] = useState<bigint | null>(null);
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -54,7 +63,7 @@ export default function App() {
     return lobbies.find(l => l.code === 'CAL13') || lobbies[0];
   }, [lobbies, selectedLobbyCode]);
 
-  // Sync market and join lobby to receive initial starting bankroll
+  // Sync market and join lobby
   useEffect(() => {
     if (activeLobby && connected) {
       if (activeLobby.marketId) {
@@ -63,7 +72,7 @@ export default function App() {
       try {
         joinLobbyReducer({ code: activeLobby.code });
       } catch {
-        // Ignored if already joined
+        // Ignored
       }
     }
   }, [activeLobby?.code, activeLobby?.marketId, connected, joinLobbyReducer]);
@@ -80,15 +89,6 @@ export default function App() {
     return markets.find(m => m.marketId === selectedMarketId) ?? null;
   }, [markets, selectedMarketId]);
 
-  // RBAC: Check if current player is the Instructor for active lobby
-  const isInstructor = useMemo(() => {
-    if (!myIdentity || !activeLobby) return false;
-    const myHex = myIdentity.toHexString();
-    const instHex = activeLobby.instructor.toHexString();
-    // Match caller's identity or unassigned system identity
-    return instHex === myHex || instHex.replace(/0/g, '') === '';
-  }, [myIdentity, activeLobby]);
-
   // Current player record
   const currentPlayer = useMemo(() => {
     if (!myIdentity) return null;
@@ -96,11 +96,30 @@ export default function App() {
     return players.find(p => p.identity.toHexString() === hex) ?? null;
   }, [players, myIdentity]);
 
-  // Auto-bot autonomous engine state
-  const [isAutoBotRunning, setIsAutoBotRunning] = useState(false);
-  const [botSpeedMs, setBotSpeedMs] = useState(600);
+  // Check if current user is the Instructor for this lobby
+  const isInstructor = useMemo(() => {
+    if (!myIdentity || !activeLobby) return false;
+    const myHex = myIdentity.toHexString();
+    const instHex = activeLobby.instructor.toHexString();
+    return instHex === myHex || instHex.replace(/0/g, '') === '';
+  }, [myIdentity, activeLobby]);
 
-  // Autonomous Bot Execution Interval Loop
+  // Map SpacetimeDB players for Phaser scene
+  const phaserPlayers: PlayerData[] = useMemo(() => {
+    return players.map(p => ({
+      identityHex: p.identity.toHexString(),
+      username: p.username,
+      cashBalance: Number(p.cashBalance),
+      x: p.x,
+      y: p.y,
+      direction: p.direction,
+      isBot: p.username.toLowerCase().includes('whale') || p.username.toLowerCase().includes('bot'),
+    }));
+  }, [players]);
+
+  // Auto-bot AMM tick loop
+  const [isAutoBotRunning, setIsAutoBotRunning] = useState(false);
+  const botSpeedMs = 600;
   const activeMarketIdRef = useRef<bigint | null>(null);
   activeMarketIdRef.current = activeMarket?.marketId ?? null;
 
@@ -117,128 +136,200 @@ export default function App() {
     return () => clearInterval(interval);
   }, [isAutoBotRunning, connected, botSpeedMs, optimalBotTickReducer]);
 
-  const handleSelectPrice = (price: number, side: 'BID' | 'ASK') => {
-    setSelectedPrice({ price, side });
+  // Movement handler from Phaser
+  const handlePlayerMove = (x: number, y: number, direction: string) => {
+    if (!connected) return;
+    try {
+      movePlayerReducer({ x, y, direction });
+    } catch {
+      // Ignored
+    }
   };
 
-  const handleSelectLobby = (lobby: Lobby) => {
-    setSelectedLobbyCode(lobby.code);
-    setSelectedMarketId(lobby.marketId);
+  // Toggle Pit Overlay
+  const handleTogglePitOverlay = (open?: boolean) => {
+    setIsPitOverlayOpen(prev => (open !== undefined ? open : !prev));
+  };
+
+  // Place order wrapper
+  const handlePlaceOrder = async (side: 'YES' | 'NO', price: number, quantity: number) => {
+    if (!activeMarket) return;
+    placeOrderReducer({
+      marketId: activeMarket.marketId,
+      side,
+      price,
+      quantity,
+    });
+  };
+
+  // Cancel order wrapper
+  const handleCancelOrder = (orderId: bigint) => {
+    cancelOrderReducer({ orderId });
+  };
+
+  // Create lobby wrapper
+  const handleCreateLobby = async (
+    code: string,
+    title: string,
+    marketId: bigint,
+    initialBalanceDollars: number
+  ) => {
+    const initialBalanceCents = BigInt(Math.round(initialBalanceDollars * 100));
+    createLobbyReducer({
+      code,
+      title,
+      marketId,
+      initialBalance: initialBalanceCents,
+    });
+    setSelectedLobbyCode(code);
+    setSelectedMarketId(marketId);
   };
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans selection:bg-indigo-500/30 selection:text-white">
-      {/* Top Navbar with Account Switcher, Lobby Indicator & QR Button */}
-      <Navbar
+    <div className="min-h-screen bg-[#070a13] text-slate-100 flex flex-col font-sans selection:bg-indigo-500/30 selection:text-white">
+      {/* Top Arcade Navigation & Bankroll Bar */}
+      <TopArcadeBar
         connected={connected}
-        myIdentity={myIdentity ?? null}
         player={currentPlayer}
         activeLobby={activeLobby}
         isInstructor={isInstructor}
-        onOpenLobbyModal={() => setIsLobbyModalOpen(true)}
+        isInsidePit={isInsidePit}
         isAutoBotRunning={isAutoBotRunning}
-        onToggleAutoBot={() => setIsAutoBotRunning(prev => !prev)}
         botSpeedMs={botSpeedMs}
-        onChangeBotSpeed={setBotSpeedMs}
+        onToggleAutoBot={() => setIsAutoBotRunning(prev => !prev)}
+        onOpenLobbyModal={() => setIsLobbyModalOpen(true)}
+        onOpenInstructorModal={() => setIsInstructorModalOpen(true)}
+        onOpenTradingPit={() => setIsPitOverlayOpen(true)}
+        onChangeUsername={name => setUsernameReducer({ username: name })}
       />
 
-      {/* Main Terminal Workspace */}
-      <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 space-y-5">
-        {/* Market Banner / Stats Header (with Instructor Resolution Controls) */}
-        <MarketBanner
-          markets={markets}
-          activeMarket={activeMarket}
-          isInstructor={isInstructor}
-          onSelectMarket={id => {
-            setSelectedMarketId(id);
-            setSelectedPrice(null);
-          }}
-          onOpenCreateModal={() => setIsCreateModalOpen(true)}
-        />
+      {/* Main Floor Arena (Phaser 3 Canvas Wrapper) */}
+      <main className="flex-1 flex flex-col items-center justify-center p-2 sm:p-4 relative">
+        <div className="w-full max-w-5xl flex flex-col items-center space-y-3">
+          {/* Active Question Banner */}
+          <div className="w-full bg-slate-900/80 border border-indigo-500/30 rounded-lg px-4 py-2 flex flex-wrap items-center justify-between gap-3 text-xs font-mono shadow-md">
+            <div className="flex items-center gap-2 truncate">
+              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+              <span className="text-slate-400">CONTRACT:</span>
+              <span className="font-bold text-white truncate text-sm">
+                {activeMarket?.question || 'Classroom 3-Card Expected Sum > 20'}
+              </span>
+            </div>
 
-        {/* Classroom / Progressive Card & Information Revelation Stream */}
-        <ClassroomClues
-          activeMarket={activeMarket}
-          clues={clues}
-          isInstructor={isInstructor}
-        />
-
-        {/* 3-Column Trading Deck */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5 items-stretch">
-          {/* Col 1: Central Limit Order Book (CLOB with YES/NO Dual-Denomination View) */}
-          <div className="min-h-[480px]">
-            <OrderBook
-              orders={orders}
-              activeMarketId={activeMarket?.marketId ?? null}
-              lastTradedPrice={activeMarket ? activeMarket.lastTradedPrice : 50}
-              myIdentity={myIdentity ?? null}
-              onSelectPrice={handleSelectPrice}
-            />
+            <div className="flex items-center gap-4 text-xs font-mono">
+              <span className="text-slate-400">
+                LAST: <strong className="text-emerald-400">{activeMarket?.lastTradedPrice ?? 50}¢</strong>
+              </span>
+              <span className="text-slate-400">
+                FAIR: <strong className="text-sky-400">{activeMarket?.fairPrice ?? 50}¢</strong>
+              </span>
+              <span className="text-slate-400">
+                VOL: <strong className="text-white">{Number(activeMarket?.volume ?? 0n)}</strong>
+              </span>
+              <button
+                onClick={() => setIsPitOverlayOpen(true)}
+                className="px-2.5 py-1 bg-indigo-600 hover:bg-indigo-500 text-white rounded font-['Press_Start_2P'] text-[8px] transition cursor-pointer"
+              >
+                OPEN PIT [E]
+              </button>
+            </div>
           </div>
 
-          {/* Col 2: Trade Execution Ticket with EV Optimality Gauge */}
-          <div className="min-h-[480px]">
-            <TradeTicket
-              connected={connected}
-              market={activeMarket}
-              player={currentPlayer}
-              selectedPrice={selectedPrice}
-            />
-          </div>
-
-          {/* Col 3: Live Trades Tape with Participant Badges */}
-          <div className="min-h-[480px] md:col-span-2 lg:col-span-1">
-            <RecentTrades
-              trades={trades}
-              activeMarketId={activeMarket?.marketId ?? null}
-              myIdentity={myIdentity ?? null}
-            />
-          </div>
-        </div>
-
-        {/* Bottom Section: Positions & Open Orders */}
-        <div>
-          <Portfolio
-            myIdentity={myIdentity ?? null}
-            player={currentPlayer}
-            positions={positions}
-            orders={orders}
-            markets={markets}
-            onSelectMarket={id => {
-              setSelectedMarketId(id);
-              setSelectedPrice(null);
-            }}
+          {/* Phaser 3 2D Canvas */}
+          <PhaserGame
+            players={phaserPlayers}
+            myIdentityHex={myIdentity ? myIdentity.toHexString() : ''}
+            activeMarketQuestion={activeMarket?.question}
+            lastTradedPrice={activeMarket?.lastTradedPrice ?? 50}
+            marketVolume={Number(activeMarket?.volume ?? 0n)}
+            onPlayerMove={handlePlayerMove}
+            onTogglePitOverlay={handleTogglePitOverlay}
+            onProximityChange={setIsInsidePit}
           />
+
+          {/* Arcade Controls Legend / Floor Guide */}
+          <div className="w-full flex flex-wrap items-center justify-between gap-2 px-3 py-2 bg-slate-950/90 border border-slate-800 rounded-lg text-[10px] font-mono text-slate-400">
+            <div className="flex items-center gap-3">
+              <span>🎮 <strong className="text-slate-200">[W][A][S][D] / [ARROWS]</strong> Walk on Floor</span>
+              <span>⚡ <strong className="text-yellow-400">[E]</strong> Enter Trading Pit</span>
+              <span>❌ <strong className="text-slate-200">[ESC]</strong> Close Terminal</span>
+            </div>
+            <div className="text-slate-500">
+              SpacetimeDB CLOB Engine • 1 YES + 1 NO = $1.00 • 32x32 Open Outcry
+            </div>
+          </div>
         </div>
       </main>
 
-      {/* Footer */}
-      <footer className="border-t border-slate-900 bg-slate-950/80 py-4 px-6 text-center text-xs text-slate-400">
-        <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-2">
-          <span>
-            Deterministic CLOB Engine • Autonomous AMM & Value Sniper Bots
-          </span>
-          <span className="font-mono text-slate-400">
-            Strict Integer-Cents Math (1¢ - 99¢) • Payout $1.00/contract
-          </span>
-        </div>
-      </footer>
-
-      {/* Create Market Modal */}
-      <CreateMarketModal
-        isOpen={isCreateModalOpen}
-        onClose={() => setIsCreateModalOpen(false)}
+      {/* Phase 3: The HTML/Tailwind Financial Terminal Overlay */}
+      <TradingPitOverlay
+        isOpen={isPitOverlayOpen}
+        onClose={() => setIsPitOverlayOpen(false)}
+        market={activeMarket}
+        orders={orders}
+        trades={trades}
+        player={currentPlayer}
+        positions={positions}
+        myIdentity={myIdentity ?? null}
+        onPlaceOrder={handlePlaceOrder}
+        onCancelOrder={handleCancelOrder}
       />
 
-      {/* Lobby Management & QR Code Modal */}
+      {/* Multiplayer Lobby & QR Invite Modal */}
       <LobbyModal
         isOpen={isLobbyModalOpen}
         onClose={() => setIsLobbyModalOpen(false)}
         activeLobby={activeLobby}
         allLobbies={lobbies}
         markets={markets}
-        myIdentity={myIdentity ?? null}
-        onSelectLobby={handleSelectLobby}
+        onSelectLobby={l => {
+          setSelectedLobbyCode(l.code);
+          setSelectedMarketId(l.marketId);
+        }}
+        onCreateLobby={handleCreateLobby}
+      />
+
+      {/* Instructor Classroom & Market Resolution Modal */}
+      <InstructorModal
+        isOpen={isInstructorModalOpen}
+        onClose={() => setIsInstructorModalOpen(false)}
+        market={activeMarket}
+        clues={clues}
+        activeLobbyCode={activeLobby?.code || 'CAL13'}
+        onRevealClue={(title, content, newFairPrice) => {
+          if (activeMarket) {
+            revealClueReducer({
+              marketId: activeMarket.marketId,
+              title,
+              content,
+              newFairPrice,
+            });
+          }
+        }}
+        onClearClues={() => {
+          if (activeMarket) {
+            clearCluesReducer({ marketId: activeMarket.marketId });
+          }
+        }}
+        onResolveMarket={winningSide => {
+          if (activeMarket) {
+            resolveMarketReducer({
+              marketId: activeMarket.marketId,
+              winningSide,
+            });
+          }
+        }}
+        onResetMarket={() => {
+          if (activeMarket) {
+            resetMarketReducer({
+              marketId: activeMarket.marketId,
+              defaultPrice: activeMarket.fairPrice || 50,
+            });
+          }
+        }}
+        onResetBalances={code => {
+          resetLobbyBalancesReducer({ code });
+        }}
       />
     </div>
   );

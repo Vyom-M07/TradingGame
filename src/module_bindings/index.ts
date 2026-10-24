@@ -40,6 +40,7 @@ import ClearCluesReducer from "./clear_clues_reducer";
 import CreateLobbyReducer from "./create_lobby_reducer";
 import CreateMarketReducer from "./create_market_reducer";
 import JoinLobbyReducer from "./join_lobby_reducer";
+import MovePlayerReducer from "./move_player_reducer";
 import OptimalBotTickReducer from "./optimal_bot_tick_reducer";
 import PlaceOrderReducer from "./place_order_reducer";
 import ResetLobbyBalancesReducer from "./reset_lobby_balances_reducer";
@@ -189,6 +190,7 @@ const reducersSchema = __reducers(
   __reducerSchema("create_lobby", CreateLobbyReducer),
   __reducerSchema("create_market", CreateMarketReducer),
   __reducerSchema("join_lobby", JoinLobbyReducer),
+  __reducerSchema("move_player", MovePlayerReducer),
   __reducerSchema("optimal_bot_tick", OptimalBotTickReducer),
   __reducerSchema("place_order", PlaceOrderReducer),
   __reducerSchema("reset_lobby_balances", ResetLobbyBalancesReducer),

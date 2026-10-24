@@ -9,7 +9,10 @@ const player = table(
   {
     identity: t.identity().primaryKey(),
     username: t.string(),
-    cashBalance: t.u64(), // cash in cents (e.g., 100000 = $1,000.00)
+    cashBalance: t.u64(), // cash in cents
+    x: t.i32(), // tile grid x (0 to 19)
+    y: t.i32(), // tile grid y (0 to 10)
+    direction: t.string(), // "up" | "down" | "left" | "right"
     createdAt: t.timestamp(),
   }
 );
@@ -152,6 +155,9 @@ function getOrCreatePlayer(ctx: Ctx) {
       identity: ctx.sender,
       username: 'Trader_' + ctx.sender.toHexString().slice(0, 6),
       cashBalance: 10_000n, // $100.00 default initial starting bankroll in cents
+      x: 3,
+      y: 5,
+      direction: 'right',
       createdAt: ctx.timestamp,
     });
   }
@@ -363,6 +369,28 @@ export const setUsername = spacetimedb.reducer(
     }
     const p = getOrCreatePlayer(ctx);
     ctx.db.player.identity.update({ ...p, username: trimmed });
+  }
+);
+
+/**
+ * Move Player Grid Coordinates in 2D Trading Floor
+ */
+export const movePlayer = spacetimedb.reducer(
+  {
+    x: t.i32(),
+    y: t.i32(),
+    direction: t.string(),
+  },
+  (ctx, { x, y, direction }) => {
+    const clampedX = Math.max(0, Math.min(19, x));
+    const clampedY = Math.max(0, Math.min(10, y));
+    const p = getOrCreatePlayer(ctx);
+    ctx.db.player.identity.update({
+      ...p,
+      x: clampedX,
+      y: clampedY,
+      direction: direction || p.direction,
+    });
   }
 );
 

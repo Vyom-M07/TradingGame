@@ -72,6 +72,9 @@ export const Player = __t.object("Player", {
   identity: __t.identity(),
   username: __t.string(),
   cashBalance: __t.u64(),
+  x: __t.i32(),
+  y: __t.i32(),
+  direction: __t.string(),
   createdAt: __t.timestamp(),
 });
 export type Player = __Infer<typeof Player>;
