@@ -1,12 +1,14 @@
-import { useState, useMemo, useEffect, useRef } from 'react';
+import { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import { useSpacetimeDB, useTable, useReducer } from 'spacetimedb/react';
 import { tables, reducers } from './module_bindings';
 import { PhaserGame } from './game/PhaserGame';
-import { PlayerData } from './game/TradingPitScene';
+import { PlayerData, TradingPitScene } from './game/TradingPitScene';
+import { agentKindFor } from './game/assets';
 import { TradingPitOverlay } from './components/TradingPitOverlay';
-import { TopArcadeBar } from './components/TopArcadeBar';
+import { Hud, NewsFlash } from './components/Hud';
 import { LobbyModal } from './components/LobbyModal';
 import { InstructorModal } from './components/InstructorModal';
+import { HelpDialog, ProfileDialog } from './components/Dialogs';
 
 export default function App() {
   const { isActive: connected, identity: myIdentity } = useSpacetimeDB();
@@ -16,8 +18,8 @@ export default function App() {
   const [orders] = useTable(tables.order);
   const [players] = useTable(tables.player);
   const [positions] = useTable(tables.position);
-  const [trades] = useTable(tables.trade);
-  const [clues] = useTable(tables.clue);
+  const [trades, tradesReady] = useTable(tables.trade);
+  const [clues, cluesReady] = useTable(tables.clue);
   const [lobbies] = useTable(tables.lobby);
 
   // SpacetimeDB reducers
@@ -34,24 +36,29 @@ export default function App() {
   const resetLobbyBalancesReducer = useReducer(reducers.resetLobbyBalances);
   const optimalBotTickReducer = useReducer(reducers.optimalBotTick);
 
-  // UI Modal & Overlay States
+  // Overlay state
   const [isPitOverlayOpen, setIsPitOverlayOpen] = useState(false);
   const [isInsidePit, setIsInsidePit] = useState(false);
   const [isLobbyModalOpen, setIsLobbyModalOpen] = useState(false);
   const [isInstructorModalOpen, setIsInstructorModalOpen] = useState(false);
+  const [isHelpOpen, setIsHelpOpen] = useState(false);
+  const [isProfileOpen, setIsProfileOpen] = useState(false);
+  const [minimapVisible, setMinimapVisible] = useState(true);
+  const [news, setNews] = useState<{ title: string; content: string } | null>(null);
+
+  const anyOverlayOpen =
+    isPitOverlayOpen || isLobbyModalOpen || isInstructorModalOpen || isHelpOpen || isProfileOpen;
+
+  const sceneRef = useRef<TradingPitScene | null>(null);
 
   // Active Lobby State & URL Parameter (?lobby=CAL13)
   const [selectedLobbyCode, setSelectedLobbyCode] = useState<string | null>(null);
   const [selectedMarketId, setSelectedMarketId] = useState<bigint | null>(null);
 
   useEffect(() => {
-    if (typeof window !== 'undefined') {
-      const params = new URLSearchParams(window.location.search);
-      const urlLobby = params.get('lobby');
-      if (urlLobby) {
-        setSelectedLobbyCode(urlLobby.trim().toUpperCase());
-      }
-    }
+    const params = new URLSearchParams(window.location.search);
+    const urlLobby = params.get('lobby');
+    if (urlLobby) setSelectedLobbyCode(urlLobby.trim().toUpperCase());
   }, []);
 
   const activeLobby = useMemo(() => {
@@ -66,9 +73,7 @@ export default function App() {
   // Sync market and join lobby
   useEffect(() => {
     if (activeLobby && connected) {
-      if (activeLobby.marketId) {
-        setSelectedMarketId(activeLobby.marketId);
-      }
+      if (activeLobby.marketId) setSelectedMarketId(activeLobby.marketId);
       try {
         joinLobbyReducer({ code: activeLobby.code });
       } catch {
@@ -89,33 +94,80 @@ export default function App() {
     return markets.find(m => m.marketId === selectedMarketId) ?? null;
   }, [markets, selectedMarketId]);
 
-  // Current player record
-  const currentPlayer = useMemo(() => {
-    if (!myIdentity) return null;
-    const hex = myIdentity.toHexString();
-    return players.find(p => p.identity.toHexString() === hex) ?? null;
-  }, [players, myIdentity]);
+  const myHex = myIdentity?.toHexString() ?? '';
+
+  const currentPlayer = useMemo(
+    () => (myHex ? players.find(p => p.identity.toHexString() === myHex) ?? null : null),
+    [players, myHex]
+  );
+
+  const currentPosition = useMemo(() => {
+    if (!myHex || !activeMarket) return null;
+    return positions.find(p => p.marketId === activeMarket.marketId && p.owner.toHexString() === myHex) ?? null;
+  }, [positions, activeMarket, myHex]);
 
   // Check if current user is the Instructor for this lobby
   const isInstructor = useMemo(() => {
     if (!myIdentity || !activeLobby) return false;
-    const myHex = myIdentity.toHexString();
     const instHex = activeLobby.instructor.toHexString();
     return instHex === myHex || instHex.replace(/0/g, '') === '';
-  }, [myIdentity, activeLobby]);
+  }, [myIdentity, myHex, activeLobby]);
 
-  // Map SpacetimeDB players for Phaser scene
-  const phaserPlayers: PlayerData[] = useMemo(() => {
-    return players.map(p => ({
-      identityHex: p.identity.toHexString(),
-      username: p.username,
-      cashBalance: Number(p.cashBalance),
-      x: p.x,
-      y: p.y,
-      direction: p.direction,
-      isBot: p.username.toLowerCase().includes('whale') || p.username.toLowerCase().includes('bot'),
-    }));
-  }, [players]);
+  // Map SpacetimeDB players for the Phaser scene
+  const phaserPlayers: PlayerData[] = useMemo(
+    () =>
+      players.map(p => ({
+        identityHex: p.identity.toHexString(),
+        username: p.username,
+        cashBalance: Number(p.cashBalance),
+        x: p.x,
+        y: p.y,
+        direction: p.direction,
+        kind: agentKindFor(p.username),
+      })),
+    [players]
+  );
+
+  // Speech bubbles for new fills on the active market.
+  const seenTrades = useRef<Set<string> | null>(null);
+  useEffect(() => {
+    if (!tradesReady) return;
+    if (seenTrades.current === null) {
+      seenTrades.current = new Set(trades.map(t => t.tradeId.toString()));
+      return;
+    }
+    for (const t of trades) {
+      const id = t.tradeId.toString();
+      if (seenTrades.current.has(id)) continue;
+      seenTrades.current.add(id);
+      if (activeMarket && t.marketId !== activeMarket.marketId) continue;
+      const scene = sceneRef.current;
+      if (!scene) continue;
+      const takerPrice = t.takerSide === 'YES' ? t.price : 100 - t.price;
+      const makerPrice = t.makerSide === 'YES' ? t.price : 100 - t.price;
+      scene.say(t.taker.toHexString(), `${t.quantity} ${t.takerSide} @ ${takerPrice}¢!`, t.takerSide === 'YES' ? '#15803d' : '#be123c');
+      if (t.maker.toHexString() !== t.taker.toHexString()) {
+        scene.say(t.maker.toHexString(), `Filled ${t.makerSide} @ ${makerPrice}¢`, '#1d1b2a');
+      }
+      scene.triggerTradeExecutionEffect(t.price, t.quantity);
+    }
+  }, [trades, tradesReady, activeMarket]);
+
+  // News flash when the host reveals a clue.
+  const seenClues = useRef<Set<string> | null>(null);
+  useEffect(() => {
+    if (!cluesReady) return;
+    if (seenClues.current === null) {
+      seenClues.current = new Set(clues.map(c => c.clueId.toString()));
+      return;
+    }
+    for (const c of clues) {
+      const id = c.clueId.toString();
+      if (seenClues.current.has(id)) continue;
+      seenClues.current.add(id);
+      if (!activeMarket || c.marketId === activeMarket.marketId) setNews({ title: c.title, content: c.content });
+    }
+  }, [clues, cluesReady, activeMarket]);
 
   // Auto-bot AMM tick loop
   const [isAutoBotRunning, setIsAutoBotRunning] = useState(false);
@@ -125,149 +177,91 @@ export default function App() {
 
   useEffect(() => {
     if (!isAutoBotRunning || !connected) return;
-
     const interval = setInterval(() => {
       const currentId = activeMarketIdRef.current;
-      if (currentId) {
-        optimalBotTickReducer({ marketId: currentId });
-      }
+      if (currentId) optimalBotTickReducer({ marketId: currentId });
     }, botSpeedMs);
-
     return () => clearInterval(interval);
-  }, [isAutoBotRunning, connected, botSpeedMs, optimalBotTickReducer]);
+  }, [isAutoBotRunning, connected, optimalBotTickReducer]);
 
-  // Movement handler from Phaser
-  const handlePlayerMove = (x: number, y: number, direction: string) => {
-    if (!connected) return;
-    try {
-      movePlayerReducer({ x, y, direction });
-    } catch {
-      // Ignored
-    }
-  };
+  const handlePlayerMove = useCallback(
+    (x: number, y: number, direction: string) => {
+      if (!connected) return;
+      try {
+        movePlayerReducer({ x, y, direction });
+      } catch {
+        // Ignored
+      }
+    },
+    [connected, movePlayerReducer]
+  );
 
-  // Toggle Pit Overlay
-  const handleTogglePitOverlay = (open?: boolean) => {
+  const handleTogglePitOverlay = useCallback((open?: boolean) => {
     setIsPitOverlayOpen(prev => (open !== undefined ? open : !prev));
-  };
+  }, []);
 
-  // Place order wrapper
   const handlePlaceOrder = async (side: 'YES' | 'NO', price: number, quantity: number) => {
     if (!activeMarket) return;
-    placeOrderReducer({
-      marketId: activeMarket.marketId,
-      side,
-      price,
-      quantity,
-    });
+    placeOrderReducer({ marketId: activeMarket.marketId, side, price, quantity });
   };
 
-  // Cancel order wrapper
   const handleCancelOrder = (orderId: bigint) => {
     cancelOrderReducer({ orderId });
   };
 
-  // Create lobby wrapper
-  const handleCreateLobby = async (
-    code: string,
-    title: string,
-    marketId: bigint,
-    initialBalanceDollars: number
-  ) => {
+  const handleCreateLobby = async (code: string, title: string, marketId: bigint, initialBalanceDollars: number) => {
     const initialBalanceCents = BigInt(Math.round(initialBalanceDollars * 100));
-    createLobbyReducer({
-      code,
-      title,
-      marketId,
-      initialBalance: initialBalanceCents,
-    });
+    createLobbyReducer({ code, title, marketId, initialBalance: initialBalanceCents });
     setSelectedLobbyCode(code);
     setSelectedMarketId(marketId);
   };
 
+  const closeNews = useCallback(() => setNews(null), []);
+
   return (
-    <div className="min-h-screen bg-[#070a13] text-slate-100 flex flex-col font-sans selection:bg-indigo-500/30 selection:text-white">
-      {/* Top Arcade Navigation & Bankroll Bar */}
-      <TopArcadeBar
+    <div className="fixed inset-0 overflow-hidden">
+      <PhaserGame
+        players={phaserPlayers}
+        myIdentityHex={myHex}
+        activeMarketQuestion={activeMarket?.question}
+        lastTradedPrice={activeMarket?.lastTradedPrice ?? 50}
+        marketVolume={Number(activeMarket?.volume ?? 0n)}
+        inputEnabled={!anyOverlayOpen}
+        minimapVisible={minimapVisible}
+        onPlayerMove={handlePlayerMove}
+        onTogglePitOverlay={handleTogglePitOverlay}
+        onProximityChange={setIsInsidePit}
+        onSceneReady={scene => (sceneRef.current = scene)}
+      />
+
+      <Hud
         connected={connected}
         player={currentPlayer}
+        market={activeMarket}
+        position={currentPosition}
         activeLobby={activeLobby}
         isInstructor={isInstructor}
         isInsidePit={isInsidePit}
         isAutoBotRunning={isAutoBotRunning}
-        botSpeedMs={botSpeedMs}
+        minimapVisible={minimapVisible}
+        onToggleMinimap={() => setMinimapVisible(v => !v)}
         onToggleAutoBot={() => setIsAutoBotRunning(prev => !prev)}
-        onOpenLobbyModal={() => setIsLobbyModalOpen(true)}
-        onOpenInstructorModal={() => setIsInstructorModalOpen(true)}
         onOpenTradingPit={() => setIsPitOverlayOpen(true)}
-        onChangeUsername={name => setUsernameReducer({ username: name })}
+        onOpenLobby={() => setIsLobbyModalOpen(true)}
+        onOpenInstructor={() => setIsInstructorModalOpen(true)}
+        onOpenHelp={() => setIsHelpOpen(true)}
+        onOpenProfile={() => setIsProfileOpen(true)}
+        onDirection={dir => sceneRef.current?.setVirtualDirection(dir)}
       />
 
-      {/* Main Floor Arena (Phaser 3 Canvas Wrapper) */}
-      <main className="flex-1 flex flex-col items-center justify-center p-2 sm:p-4 relative">
-        <div className="w-full max-w-5xl flex flex-col items-center space-y-3">
-          {/* Active Question Banner */}
-          <div className="w-full bg-slate-900/80 border border-indigo-500/30 rounded-lg px-4 py-2 flex flex-wrap items-center justify-between gap-3 text-xs font-mono shadow-md">
-            <div className="flex items-center gap-2 truncate">
-              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-              <span className="text-slate-400">CONTRACT:</span>
-              <span className="font-bold text-white truncate text-sm">
-                {activeMarket?.question || 'Classroom 3-Card Expected Sum > 20'}
-              </span>
-            </div>
+      {news && <NewsFlash title={news.title} content={news.content} onDone={closeNews} />}
 
-            <div className="flex items-center gap-4 text-xs font-mono">
-              <span className="text-slate-400">
-                LAST: <strong className="text-emerald-400">{activeMarket?.lastTradedPrice ?? 50}¢</strong>
-              </span>
-              <span className="text-slate-400">
-                FAIR: <strong className="text-sky-400">{activeMarket?.fairPrice ?? 50}¢</strong>
-              </span>
-              <span className="text-slate-400">
-                VOL: <strong className="text-white">{Number(activeMarket?.volume ?? 0n)}</strong>
-              </span>
-              <button
-                onClick={() => setIsPitOverlayOpen(true)}
-                className="px-2.5 py-1 bg-indigo-600 hover:bg-indigo-500 text-white rounded font-['Press_Start_2P'] text-[8px] transition cursor-pointer"
-              >
-                OPEN PIT [E]
-              </button>
-            </div>
-          </div>
-
-          {/* Phaser 3 2D Canvas */}
-          <PhaserGame
-            players={phaserPlayers}
-            myIdentityHex={myIdentity ? myIdentity.toHexString() : ''}
-            activeMarketQuestion={activeMarket?.question}
-            lastTradedPrice={activeMarket?.lastTradedPrice ?? 50}
-            marketVolume={Number(activeMarket?.volume ?? 0n)}
-            onPlayerMove={handlePlayerMove}
-            onTogglePitOverlay={handleTogglePitOverlay}
-            onProximityChange={setIsInsidePit}
-          />
-
-          {/* Arcade Controls Legend / Floor Guide */}
-          <div className="w-full flex flex-wrap items-center justify-between gap-2 px-3 py-2 bg-slate-950/90 border border-slate-800 rounded-lg text-[10px] font-mono text-slate-400">
-            <div className="flex items-center gap-3">
-              <span>🎮 <strong className="text-slate-200">[W][A][S][D] / [ARROWS]</strong> Walk on Floor</span>
-              <span>⚡ <strong className="text-yellow-400">[E]</strong> Enter Trading Pit</span>
-              <span>❌ <strong className="text-slate-200">[ESC]</strong> Close Terminal</span>
-            </div>
-            <div className="text-slate-500">
-              SpacetimeDB CLOB Engine • 1 YES + 1 NO = $1.00 • 32x32 Open Outcry
-            </div>
-          </div>
-        </div>
-      </main>
-
-      {/* Phase 3: The HTML/Tailwind Financial Terminal Overlay */}
       <TradingPitOverlay
         isOpen={isPitOverlayOpen}
         onClose={() => setIsPitOverlayOpen(false)}
         market={activeMarket}
         orders={orders}
-        trades={trades}
+        trades={activeMarket ? trades.filter(t => t.marketId === activeMarket.marketId) : trades}
         player={currentPlayer}
         positions={positions}
         myIdentity={myIdentity ?? null}
@@ -275,7 +269,6 @@ export default function App() {
         onCancelOrder={handleCancelOrder}
       />
 
-      {/* Multiplayer Lobby & QR Invite Modal */}
       <LobbyModal
         isOpen={isLobbyModalOpen}
         onClose={() => setIsLobbyModalOpen(false)}
@@ -289,7 +282,6 @@ export default function App() {
         onCreateLobby={handleCreateLobby}
       />
 
-      {/* Instructor Classroom & Market Resolution Modal */}
       <InstructorModal
         isOpen={isInstructorModalOpen}
         onClose={() => setIsInstructorModalOpen(false)}
@@ -298,38 +290,29 @@ export default function App() {
         activeLobbyCode={activeLobby?.code || 'CAL13'}
         onRevealClue={(title, content, newFairPrice) => {
           if (activeMarket) {
-            revealClueReducer({
-              marketId: activeMarket.marketId,
-              title,
-              content,
-              newFairPrice,
-            });
+            revealClueReducer({ marketId: activeMarket.marketId, title, content, newFairPrice });
           }
         }}
         onClearClues={() => {
-          if (activeMarket) {
-            clearCluesReducer({ marketId: activeMarket.marketId });
-          }
+          if (activeMarket) clearCluesReducer({ marketId: activeMarket.marketId });
         }}
         onResolveMarket={winningSide => {
-          if (activeMarket) {
-            resolveMarketReducer({
-              marketId: activeMarket.marketId,
-              winningSide,
-            });
-          }
+          if (activeMarket) resolveMarketReducer({ marketId: activeMarket.marketId, winningSide });
         }}
         onResetMarket={() => {
           if (activeMarket) {
-            resetMarketReducer({
-              marketId: activeMarket.marketId,
-              defaultPrice: activeMarket.fairPrice || 50,
-            });
+            resetMarketReducer({ marketId: activeMarket.marketId, defaultPrice: activeMarket.fairPrice || 50 });
           }
         }}
-        onResetBalances={code => {
-          resetLobbyBalancesReducer({ code });
-        }}
+        onResetBalances={code => resetLobbyBalancesReducer({ code })}
+      />
+
+      <HelpDialog isOpen={isHelpOpen} onClose={() => setIsHelpOpen(false)} />
+      <ProfileDialog
+        isOpen={isProfileOpen}
+        onClose={() => setIsProfileOpen(false)}
+        username={currentPlayer?.username ?? ''}
+        onSave={name => setUsernameReducer({ username: name })}
       />
     </div>
   );

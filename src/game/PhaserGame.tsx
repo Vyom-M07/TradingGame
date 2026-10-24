@@ -8,9 +8,12 @@ interface PhaserGameProps {
   activeMarketQuestion?: string;
   lastTradedPrice?: number;
   marketVolume?: number;
+  inputEnabled: boolean;
+  minimapVisible: boolean;
   onPlayerMove: (x: number, y: number, direction: string) => void;
   onTogglePitOverlay: (open?: boolean) => void;
   onProximityChange?: (inPit: boolean) => void;
+  onSceneReady?: (scene: TradingPitScene) => void;
 }
 
 export function PhaserGame({
@@ -19,100 +22,95 @@ export function PhaserGame({
   activeMarketQuestion = 'CAL HACKS 13.0 FLOOR OPEN',
   lastTradedPrice = 50,
   marketVolume = 0,
+  inputEnabled,
+  minimapVisible,
   onPlayerMove,
   onTogglePitOverlay,
   onProximityChange,
+  onSceneReady,
 }: PhaserGameProps) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const gameRef = useRef<Phaser.Game | null>(null);
   const sceneRef = useRef<TradingPitScene | null>(null);
 
-  // Initialize Phaser Game instance once
+  // Keep the latest props available to the scene once it boots.
+  const latest = useRef({
+    players, myIdentityHex, activeMarketQuestion, lastTradedPrice, marketVolume, inputEnabled, minimapVisible,
+    onPlayerMove, onTogglePitOverlay, onProximityChange, onSceneReady,
+  });
+  latest.current = {
+    players, myIdentityHex, activeMarketQuestion, lastTradedPrice, marketVolume, inputEnabled, minimapVisible,
+    onPlayerMove, onTogglePitOverlay, onProximityChange, onSceneReady,
+  };
+
   useEffect(() => {
-    if (!containerRef.current || gameRef.current) return;
+    let game: Phaser.Game | null = null;
+    let cancelled = false;
 
-    const config: Phaser.Types.Core.GameConfig = {
-      type: Phaser.AUTO,
-      parent: containerRef.current,
-      width: 640,
-      height: 360,
-      pixelArt: true,
-      backgroundColor: '#070a13',
-      scale: {
-        mode: Phaser.Scale.FIT,
-        autoCenter: Phaser.Scale.CENTER_BOTH,
-      },
-      scene: [TradingPitScene],
-    };
+    // Phaser rasterises text once, so wait for the pixel font first.
+    document.fonts.load('16px "Press Start 2P"').catch(() => undefined).finally(() => {
+      if (cancelled || !containerRef.current) return;
+      game = new Phaser.Game({
+        type: Phaser.AUTO,
+        parent: containerRef.current,
+        pixelArt: true,
+        backgroundColor: '#3d6b35',
+        scale: {
+          mode: Phaser.Scale.RESIZE,
+          width: '100%',
+          height: '100%',
+        },
+        scene: [TradingPitScene],
+      });
 
-    const game = new Phaser.Game(config);
-    gameRef.current = game;
-
-    // Grab scene reference once created
-    game.events.once('ready', () => {
-      const scene = game.scene.getScene('TradingPitScene') as TradingPitScene;
-      if (scene) {
-        sceneRef.current = scene;
-        scene.setCallbacks({
-          onPlayerMove,
-          onTogglePitOverlay,
-          onProximityChange,
-          myIdentityHex,
-        });
-      }
+      game.events.once(Phaser.Core.Events.READY, () => {
+        const scene = game?.scene.getScene('TradingPitScene') as TradingPitScene | undefined;
+        if (!scene) return;
+        const onCreate = () => {
+          const p = latest.current;
+          sceneRef.current = scene;
+          scene.setCallbacks({
+            onPlayerMove: (x, y, d) => latest.current.onPlayerMove(x, y, d),
+            onTogglePitOverlay: open => latest.current.onTogglePitOverlay(open),
+            onProximityChange: inPit => latest.current.onProximityChange?.(inPit),
+            myIdentityHex: p.myIdentityHex,
+          });
+          scene.setInputEnabled(p.inputEnabled);
+          scene.setMinimapVisible(p.minimapVisible);
+          scene.updateMarketTicker(p.activeMarketQuestion, p.lastTradedPrice, p.marketVolume);
+          scene.syncPlayers(p.players, p.myIdentityHex);
+          p.onSceneReady?.(scene);
+        };
+        if (scene.sys.isActive() && scene.children) onCreate();
+        else scene.events.once(Phaser.Scenes.Events.CREATE, onCreate);
+      });
     });
 
     return () => {
-      if (gameRef.current) {
-        gameRef.current.destroy(true);
-        gameRef.current = null;
-        sceneRef.current = null;
-      }
+      cancelled = true;
+      sceneRef.current = null;
+      game?.destroy(true);
     };
   }, []);
 
-  // Update callbacks when React handlers change
   useEffect(() => {
-    if (sceneRef.current) {
-      sceneRef.current.setCallbacks({
-        onPlayerMove,
-        onTogglePitOverlay,
-        onProximityChange,
-        myIdentityHex,
-      });
-    }
-  }, [onPlayerMove, onTogglePitOverlay, onProximityChange, myIdentityHex]);
+    sceneRef.current?.setCallbacks({ myIdentityHex });
+  }, [myIdentityHex]);
 
-  // Sync multiplayer players into Phaser
   useEffect(() => {
-    if (sceneRef.current) {
-      sceneRef.current.syncPlayers(players, myIdentityHex);
-    }
+    sceneRef.current?.syncPlayers(players, myIdentityHex);
   }, [players, myIdentityHex]);
 
-  // Update ticker display when market data updates
   useEffect(() => {
-    if (sceneRef.current) {
-      sceneRef.current.updateMarketTicker(
-        activeMarketQuestion,
-        lastTradedPrice,
-        marketVolume
-      );
-    }
+    sceneRef.current?.updateMarketTicker(activeMarketQuestion, lastTradedPrice, marketVolume);
   }, [activeMarketQuestion, lastTradedPrice, marketVolume]);
 
-  return (
-    <div className="relative w-full aspect-[16/9] max-w-[960px] mx-auto bg-slate-950 rounded-xl overflow-hidden border-2 border-indigo-500/40 shadow-[0_0_50px_-12px_rgba(99,102,241,0.25)]">
-      {/* Canvas Mount Target */}
-      <div
-        ref={containerRef}
-        id="phaser-game-canvas-container"
-        className="w-full h-full flex items-center justify-center select-none"
-      />
+  useEffect(() => {
+    sceneRef.current?.setInputEnabled(inputEnabled);
+  }, [inputEnabled]);
 
-      {/* Retro Arcade Glass Bezel / CRT Scanline Overlay */}
-      <div className="pointer-events-none absolute inset-0 bg-gradient-to-b from-transparent via-transparent to-black/30" />
-      <div className="pointer-events-none absolute inset-0 rounded-xl ring-1 ring-inset ring-white/10" />
-    </div>
-  );
+  useEffect(() => {
+    sceneRef.current?.setMinimapVisible(minimapVisible);
+  }, [minimapVisible]);
+
+  return <div ref={containerRef} className="fixed inset-0 select-none" id="phaser-game-canvas-container" />;
 }

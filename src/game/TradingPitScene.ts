@@ -1,13 +1,22 @@
 import * as Phaser from 'phaser';
+import {
+  AGENT_SPRITES,
+  AGENT_STYLE,
+  FACINGS,
+  MINIMAP_RECT,
+  facingFor,
+  type AgentKind,
+  type Facing,
+} from './assets';
 
 export interface PlayerData {
   identityHex: string;
   username: string;
   cashBalance: number; // in cents
-  x: number; // grid x: 0..19
-  y: number; // grid y: 0..10
+  x: number; // backend grid x: 0..19
+  y: number; // backend grid y: 0..10
   direction: string;
-  isBot?: boolean;
+  kind: AgentKind;
 }
 
 export interface TradingPitSceneConfig {
@@ -17,625 +26,892 @@ export interface TradingPitSceneConfig {
   myIdentityHex?: string;
 }
 
+interface Avatar {
+  identityHex: string;
+  kind: AgentKind;
+  body: Phaser.GameObjects.Container;
+  sprite: Phaser.GameObjects.Sprite;
+  overhead: Phaser.GameObjects.Container;
+  nameText: Phaser.GameObjects.Text;
+  marker: Phaser.GameObjects.Rectangle;
+  bubble: Phaser.GameObjects.Container | null;
+  bubbleTimer: Phaser.Time.TimerEvent | null;
+  facing: Facing;
+  gridX: number;
+  gridY: number;
+  moveTween: Phaser.Tweens.Tween | null;
+}
+
+// --- World layout ------------------------------------------------------------
+// The backend owns a 20x11 grid (x 0..19, y 0..10). It sits inside a larger
+// decorative map so the camera can fill any screen without showing an edge.
+const T = 32;
+const MAP_W = 40;
+const MAP_H = 26;
+const FX = 10; // world tile column of backend x=0
+const FY = 8; // world tile row of backend y=0
+const COLS = 20;
+const ROWS = 11;
+
+const PIT = { minX: 8, maxX: 11, minY: 4, maxY: 7 };
+const PROX = { minX: 7, maxX: 12, minY: 3, maxY: 8 };
+
+// Backend tiles occupied by furniture (local movement only).
+const BLOCKED = new Set<string>([
+  // trading desks along the north wall
+  '1,0', '2,0', '4,0', '5,0', '14,0', '15,0', '17,0', '18,0',
+  // corner plants
+  '0,0', '19,0', '0,10', '19,10',
+  // central trading post
+  '9,5', '10,5', '9,6', '10,6',
+]);
+
+const STEP_MS = 170;
+const FONT = '"Press Start 2P", monospace';
+const INK = '#1d1b2a';
+
+const PROPS = ['desk', 'plant', 'post', 'bull', 'lamp', 'bench', 'tree'] as const;
+type PropKey = (typeof PROPS)[number];
+
+const wx = (bx: number) => (FX + bx) * T + T / 2;
+const wy = (by: number) => (FY + by) * T + T / 2;
+
+// Deterministic hash so decorative scatter is identical for every client.
+function hash(x: number, y: number) {
+  let h = (x * 374761393 + y * 668265263) | 0;
+  h = (h ^ (h >>> 13)) * 1274126177;
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967295;
+}
+
 export class TradingPitScene extends Phaser.Scene {
-  // Tile dimensions (32x32 px grid, 20x11 room = 640x352, centered in 640x360)
-  public static readonly TILE_SIZE = 32;
-  public static readonly COLS = 20;
-  public static readonly ROWS = 11;
-  public static readonly OFFSET_Y = 4; // center 352px height vertically in 360px
-
-  // Trading Pit 4x4 area in the center: cols 8..11, rows 4..7
-  public static readonly PIT_MIN_X = 8;
-  public static readonly PIT_MAX_X = 11;
-  public static readonly PIT_MIN_Y = 4;
-  public static readonly PIT_MAX_Y = 7;
-
-  // Proximity zone: cols 7..12, rows 3..8
-  public static readonly PROX_MIN_X = 7;
-  public static readonly PROX_MAX_X = 12;
-  public static readonly PROX_MIN_Y = 3;
-  public static readonly PROX_MAX_Y = 8;
-
-  // Configuration callbacks
-  private configCallbacks: TradingPitSceneConfig = {};
-
-  // Local player state
-  private localGridX = 3;
-  private localGridY = 5;
-  private localDirection = 'right';
-  private isMoving = false;
-  private isInsidePitProximity = false;
+  private callbacks: TradingPitSceneConfig = {};
   private myIdentityHex = '';
 
-  // Input keys
-  private cursors!: Phaser.Types.Input.Keyboard.CursorKeys;
-  private wasd!: {
-    W: Phaser.Input.Keyboard.Key;
-    A: Phaser.Input.Keyboard.Key;
-    S: Phaser.Input.Keyboard.Key;
-    D: Phaser.Input.Keyboard.Key;
-    E: Phaser.Input.Keyboard.Key;
-    ESC: Phaser.Input.Keyboard.Key;
-  };
+  private avatars = new Map<string, Avatar>();
+  private local!: Avatar;
+  private localReady = false;
+  private isMoving = false;
+  private inPit = false;
+  private inputEnabled = true;
 
-  // Sprites & Containers
-  private playerContainers: Map<string, Phaser.GameObjects.Container> = new Map();
-  private localPlayerContainer!: Phaser.GameObjects.Container;
-  private pitPromptContainer!: Phaser.GameObjects.Container;
+  private cursors?: Phaser.Types.Input.Keyboard.CursorKeys;
+  private keys?: Record<'W' | 'A' | 'S' | 'D', Phaser.Input.Keyboard.Key>;
+
+  private minimap?: Phaser.Cameras.Scene2D.Camera;
+  private minimapVisible = true;
+  private virtualDirection: string | null = null;
+
   private tickerText!: Phaser.GameObjects.Text;
-  private tickerBanner!: string;
+  private tickerMessage = '';
+  private tickerOffset = 0;
+  private tickerWidthChars = 60;
+  private yesPriceText!: Phaser.GameObjects.Text;
+  private noPriceText!: Phaser.GameObjects.Text;
+  private pitHint!: Phaser.GameObjects.Container;
+
+  private missing = new Set<string>();
+  private walkAnims = new Set<Facing>();
 
   constructor() {
     super({ key: 'TradingPitScene' });
   }
 
-  public init(data: TradingPitSceneConfig) {
-    this.configCallbacks = data || {};
-    if (data?.myIdentityHex) {
-      this.myIdentityHex = data.myIdentityHex;
-    }
+  public setCallbacks(callbacks: TradingPitSceneConfig) {
+    this.callbacks = { ...this.callbacks, ...callbacks };
+    if (callbacks.myIdentityHex) this.myIdentityHex = callbacks.myIdentityHex;
   }
 
-  public setCallbacks(callbacks: TradingPitSceneConfig) {
-    this.configCallbacks = { ...this.configCallbacks, ...callbacks };
-    if (callbacks.myIdentityHex) {
-      this.myIdentityHex = callbacks.myIdentityHex;
-    }
+  public setInputEnabled(enabled: boolean) {
+    this.inputEnabled = enabled;
+    if (!enabled) this.input.keyboard?.resetKeys();
   }
+
+  public setMinimapVisible(visible: boolean) {
+    this.minimapVisible = visible;
+    this.layout();
+  }
+
+  /** On-screen D-pad input ("up" | "down" | "left" | "right" | null). */
+  public setVirtualDirection(direction: string | null) {
+    this.virtualDirection = direction;
+  }
+
+  // --- Loading ---------------------------------------------------------------
 
   public preload() {
-    // Generate all procedural retro 32x32 pixel textures in memory
-    this.generatePixelTextures();
+    this.load.on(Phaser.Loader.Events.FILE_LOAD_ERROR, (file: Phaser.Loader.File) => {
+      this.missing.add(file.key);
+    });
+
+    for (const dir of FACINGS) {
+      this.load.image(`player-${dir}`, `/assets/player/idle/${dir}.png`);
+      for (let i = 0; i < 4; i++) {
+        this.load.image(`player-walk-${dir}-${i}`, `/assets/player/walk/${dir}_${i}.png`);
+      }
+    }
+
+    for (const [kind, cfg] of Object.entries(AGENT_SPRITES)) {
+      if (!cfg) continue;
+      for (const dir of FACINGS) this.load.image(`${kind}-${dir}`, cfg[dir]);
+    }
+
+    this.load.spritesheet('floor', '/assets/tiles/floor_pit.png', { frameWidth: T, frameHeight: T });
+    this.load.json('floor-wang', '/assets/tiles/floor_pit.wang.json');
+    this.load.spritesheet('plaza', '/assets/tiles/plaza.png', { frameWidth: T, frameHeight: T });
+    this.load.json('plaza-wang', '/assets/tiles/plaza.wang.json');
+
+    for (const key of PROPS) this.load.image(`prop-${key}`, `/assets/props/${key}.png`);
   }
 
+  private has(key: string) {
+    return this.textures.exists(key) && !this.missing.has(key);
+  }
+
+  // --- Scene setup -------------------------------------------------------------
+
   public create() {
-    // 1. Draw floor and room architecture
-    this.createRoomGeometry();
+    this.buildProceduralTextures();
+    this.buildWalkAnimations();
 
-    // 2. Draw 4x4 Trading Pit
-    this.createTradingPit();
+    this.cameras.main.setBounds(0, 0, MAP_W * T, MAP_H * T);
+    this.cameras.main.setBackgroundColor('#3d6b35');
+    this.createMinimap();
 
-    // 3. Create Wall Street electronic ticker board on top row
-    this.createTickerBoard();
+    this.drawExterior();
+    this.drawHallFloor();
+    this.drawWalls();
+    this.drawBoards();
+    this.drawPitRailing();
+    this.placeFurniture();
+    this.createPitHint();
 
-    // 4. Setup keyboard controls
+    this.local = this.createAvatar(this.myIdentityHex || 'local', 'You', 'human', 3, 5, 'south');
+    this.setName(this.local, 'You', '#ffe066');
+    this.cameras.main.startFollow(this.local.body, true, 0.15, 0.15);
+
     if (this.input.keyboard) {
       this.cursors = this.input.keyboard.createCursorKeys();
-      this.wasd = {
-        W: this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.W),
-        A: this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.A),
-        S: this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.S),
-        D: this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.D),
-        E: this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.E),
-        ESC: this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.ESC),
+      // Don't capture letter keys, so React inputs can still receive W/A/S/D/E.
+      this.keys = {
+        W: this.input.keyboard.addKey('W', false),
+        A: this.input.keyboard.addKey('A', false),
+        S: this.input.keyboard.addKey('S', false),
+        D: this.input.keyboard.addKey('D', false),
       };
-
-      // Listen for 'E' key press to toggle Trading Pit overlay
-      this.wasd.E.on('down', () => {
-        if (this.isInsidePitProximity) {
-          this.configCallbacks.onTogglePitOverlay?.();
+      this.input.keyboard.addKey('E', false).on('down', () => {
+        if (this.inputEnabled && this.inPit && !this.isTyping()) {
+          this.callbacks.onTogglePitOverlay?.(true);
         }
       });
     }
 
-    // 5. Create Pit interaction prompt (floats over pit center)
-    this.createPitPrompt();
-
-    // 6. Create local player container
-    this.createLocalPlayerSprite();
+    this.scale.on(Phaser.Scale.Events.RESIZE, this.layout, this);
+    this.layout();
   }
 
-  /**
-   * Procedural Pixel Art Generator:
-   * Generates crisp 32x32 textures using Phaser's dynamic canvas graphics.
-   */
-  private generatePixelTextures() {
-    // 1. Floor tile (32x32 rich charcoal slate with grid seam)
-    if (!this.textures.exists('tex_floor')) {
-      const g = this.make.graphics({ x: 0, y: 0 });
-      g.fillStyle(0x0f172a, 1);
-      g.fillRect(0, 0, 32, 32);
-      g.lineStyle(1, 0x1e293b, 0.8);
-      g.strokeRect(0, 0, 32, 32);
-      // Small retro speckle
-      g.fillStyle(0x334155, 0.5);
-      g.fillRect(8, 8, 2, 2);
-      g.fillRect(24, 24, 2, 2);
-      g.generateTexture('tex_floor', 32, 32);
-      g.destroy();
-    }
+  private layout() {
+    if (!this.cameras?.main) return;
+    const w = this.scale.width;
+    const h = this.scale.height;
+    // Show roughly 21x12 tiles; snap to whole zoom levels when large enough
+    // so pixels stay square.
+    const raw = Math.max(w / (21 * T), h / (12 * T));
+    const zoom = raw >= 2 ? Math.round(raw) : Math.max(1, Math.round(raw * 2) / 2);
+    this.cameras.main.setZoom(zoom);
 
-    // 2. Wall tile (32x32 dark steel with brass rivets)
-    if (!this.textures.exists('tex_wall')) {
-      const g = this.make.graphics({ x: 0, y: 0 });
-      g.fillStyle(0x090d16, 1);
-      g.fillRect(0, 0, 32, 32);
-      g.fillStyle(0x1e293b, 1);
-      g.fillRect(0, 26, 32, 6);
-      g.lineStyle(1, 0x3b82f6, 0.3);
-      g.strokeRect(0, 0, 32, 26);
-      // Brass rivet
-      g.fillStyle(0xf59e0b, 0.8);
-      g.fillCircle(4, 4, 1.5);
-      g.fillCircle(28, 4, 1.5);
-      g.generateTexture('tex_wall', 32, 32);
-      g.destroy();
-    }
-
-    // 3. Trading Pit floor tile (32x32 neon emerald carpet)
-    if (!this.textures.exists('tex_pit_floor')) {
-      const g = this.make.graphics({ x: 0, y: 0 });
-      g.fillStyle(0x064e3b, 1); // Dark emerald
-      g.fillRect(0, 0, 32, 32);
-      g.fillStyle(0x059669, 0.4);
-      g.fillRect(4, 4, 24, 24);
-      g.lineStyle(1, 0x10b981, 0.8);
-      g.strokeRect(2, 2, 28, 28);
-      // Center gold cross
-      g.fillStyle(0xf59e0b, 0.6);
-      g.fillRect(15, 13, 2, 6);
-      g.fillRect(13, 15, 6, 2);
-      g.generateTexture('tex_pit_floor', 32, 32);
-      g.destroy();
-    }
-
-    // 4. Human Trader Pixel Sprite (32x32 retro financial trader in suit)
-    if (!this.textures.exists('tex_trader')) {
-      const g = this.make.graphics({ x: 0, y: 0 });
-      // Hair (dark brown)
-      g.fillStyle(0x451a03, 1);
-      g.fillRect(11, 4, 10, 4);
-      // Face (skin tone)
-      g.fillStyle(0xfcd34d, 1);
-      g.fillRect(11, 8, 10, 6);
-      // Sunglasses / eyes
-      g.fillStyle(0x0f172a, 1);
-      g.fillRect(13, 9, 2, 2);
-      g.fillRect(17, 9, 2, 2);
-      // Navy Suit jacket
-      g.fillStyle(0x1e3a8a, 1);
-      g.fillRect(9, 14, 14, 10);
-      // White shirt collar & red tie
-      g.fillStyle(0xffffff, 1);
-      g.fillRect(14, 14, 4, 4);
-      g.fillStyle(0xef4444, 1); // Red power tie
-      g.fillRect(15, 16, 2, 6);
-      // Briefcase in right hand
-      g.fillStyle(0x78350f, 1);
-      g.fillRect(23, 18, 5, 4);
-      g.fillStyle(0xf59e0b, 1);
-      g.fillRect(24, 17, 3, 1);
-      // Trousers (charcoal)
-      g.fillStyle(0x1e293b, 1);
-      g.fillRect(11, 24, 4, 6);
-      g.fillRect(17, 24, 4, 6);
-      // Black shoes
-      g.fillStyle(0x020617, 1);
-      g.fillRect(10, 30, 5, 2);
-      g.fillRect(17, 30, 5, 2);
-      g.generateTexture('tex_trader', 32, 32);
-      g.destroy();
-    }
-
-    // 5. The Whale AI Bot Sprite (32x32 gold / cyber cyborg trader)
-    if (!this.textures.exists('tex_whale_bot')) {
-      const g = this.make.graphics({ x: 0, y: 0 });
-      // Cyber Crown / Antenna
-      g.fillStyle(0x8b5cf6, 1);
-      g.fillRect(14, 2, 4, 4);
-      // Golden Whale Head
-      g.fillStyle(0xf59e0b, 1);
-      g.fillRect(8, 6, 16, 10);
-      // Cyber neon visor (cyan glowing)
-      g.fillStyle(0x06b6d4, 1);
-      g.fillRect(10, 9, 12, 3);
-      // Purple velvet suit
-      g.fillStyle(0x581c87, 1);
-      g.fillRect(8, 16, 16, 9);
-      // Diamond medallion
-      g.fillStyle(0x38bdf8, 1);
-      g.fillRect(14, 18, 4, 4);
-      // Gold cane
-      g.fillStyle(0xfef08a, 1);
-      g.fillRect(24, 14, 2, 14);
-      g.fillCircle(25, 13, 3);
-      // Cyber boots
-      g.fillStyle(0xd97706, 1);
-      g.fillRect(10, 25, 4, 7);
-      g.fillRect(18, 25, 4, 7);
-      g.generateTexture('tex_whale_bot', 32, 32);
-      g.destroy();
+    if (this.minimap) {
+      const { left, bottom, width, height } = MINIMAP_RECT;
+      this.minimap.setViewport(left, h - bottom - height, width, height);
+      // The HUD frame is hidden below 640px wide (Tailwind's sm breakpoint).
+      this.minimap.setVisible(this.minimapVisible && w >= 640);
     }
   }
 
-  /**
-   * Builds the 20x11 room floor and perimeter
-   */
-  private createRoomGeometry() {
-    for (let r = 0; r < TradingPitScene.ROWS; r++) {
-      for (let c = 0; c < TradingPitScene.COLS; c++) {
-        const x = c * TradingPitScene.TILE_SIZE + 16;
-        const y = r * TradingPitScene.TILE_SIZE + 16 + TradingPitScene.OFFSET_Y;
+  private isTyping() {
+    const el = document.activeElement;
+    return !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT');
+  }
 
-        if (r === 0) {
-          // Row 0 is the north wall with LED display
-          this.add.image(x, y, 'tex_wall');
-        } else {
-          // Regular floor
-          this.add.image(x, y, 'tex_floor');
+  // --- Textures ----------------------------------------------------------------
+
+  private buildProceduralTextures() {
+    const make = (key: string, w: number, h: number, draw: (g: Phaser.GameObjects.Graphics) => void) => {
+      if (this.textures.exists(key)) return;
+      const g = this.make.graphics({ x: 0, y: 0 }, false);
+      draw(g);
+      g.generateTexture(key, w, h);
+      g.destroy();
+    };
+
+    // Wall cap seen from above: warm sandstone with a darker rim.
+    make('wall-cap', T, T, g => {
+      g.fillStyle(0x8c7556).fillRect(0, 0, T, T);
+      g.fillStyle(0xc9ae84).fillRect(0, 2, T, T - 5);
+      g.fillStyle(0xd9c29b).fillRect(0, 3, T, 4);
+      g.fillStyle(0xb39770).fillRect(0, T - 6, T, 2);
+      g.fillStyle(0x5e4d38).fillRect(0, T - 3, T, 3);
+    });
+
+    // Side wall cap: same stone running north-south.
+    make('wall-cap-v', T, T, g => {
+      g.fillStyle(0x8c7556).fillRect(0, 0, T, T);
+      g.fillStyle(0xc9ae84).fillRect(3, 0, T - 6, T);
+      g.fillStyle(0xd9c29b).fillRect(5, 0, 4, T);
+      g.fillStyle(0xb39770).fillRect(T - 9, 0, 2, T);
+      g.fillStyle(0xbfa57c).fillRect(3, T - 1, T - 6, 1);
+      g.fillStyle(0x5e4d38).fillRect(0, 0, 2, T).fillRect(T - 2, 0, 2, T);
+    });
+
+    // North wall face: cream stone blocks over a dark skirting board.
+    make('wall-face', T, T * 2, g => {
+      g.fillStyle(0xe6d6b5).fillRect(0, 0, T, T * 2);
+      g.fillStyle(0xd3c09b);
+      for (let row = 0; row < 7; row++) {
+        const y = 4 + row * 8;
+        g.fillRect(0, y, T, 1);
+        const off = row % 2 === 0 ? 0 : 16;
+        g.fillRect(off + 7, y - 7, 1, 7);
+        g.fillRect((off + 23) % T, y - 7, 1, 7);
+      }
+      g.fillStyle(0xf3e7cf).fillRect(0, 0, T, 2);
+      g.fillStyle(0x7a6448).fillRect(0, T * 2 - 10, T, 2);
+      g.fillStyle(0x4a3c2c).fillRect(0, T * 2 - 8, T, 8);
+      g.fillStyle(0x5e4d38).fillRect(0, T * 2 - 8, T, 1);
+    });
+
+    // Pilaster that breaks up the long wall face.
+    make('wall-pilaster', 12, T * 2, g => {
+      g.fillStyle(0xb39770).fillRect(0, 0, 12, T * 2);
+      g.fillStyle(0xf5ead4).fillRect(1, 0, 9, T * 2 - 8);
+      g.fillStyle(0xd9c7a3).fillRect(8, 0, 2, T * 2 - 8);
+      g.fillStyle(0xfff7e6).fillRect(1, 0, 10, 4);
+      g.fillStyle(0x4a3c2c).fillRect(0, T * 2 - 8, 12, 8);
+    });
+
+    // Small flower clusters for the lawn.
+    make('flowers', 16, 16, g => {
+      const dots: [number, number, number][] = [
+        [3, 4, 0xffe066], [9, 2, 0xff6b8a], [12, 9, 0xffffff],
+        [5, 11, 0xff6b8a], [2, 8, 0xffffff], [10, 13, 0xffe066],
+      ];
+      for (const [x, y, c] of dots) {
+        g.fillStyle(c).fillRect(x, y, 2, 2);
+        g.fillStyle(0x2f5d2a).fillRect(x, y + 2, 1, 1);
+      }
+    });
+
+    // Fallback floors in case the generated tilesets are unavailable.
+    make('fallback-stone', T, T, g => {
+      g.fillStyle(0x6f7385).fillRect(0, 0, T, T);
+      g.fillStyle(0x7d8193).fillRect(1, 1, 14, 14).fillRect(17, 17, 14, 14);
+      g.fillStyle(0x777b8d).fillRect(17, 1, 14, 14).fillRect(1, 17, 14, 14);
+    });
+    make('fallback-carpet', T, T, g => {
+      g.fillStyle(0x0f3d23).fillRect(0, 0, T, T);
+      g.fillStyle(0x15502f).fillRect(2, 2, T - 4, T - 4);
+      g.fillStyle(0xc9a227).fillRect(15, 12, 2, 8).fillRect(12, 15, 8, 2);
+    });
+    make('fallback-grass', T, T, g => {
+      g.fillStyle(0x4f8a3c).fillRect(0, 0, T, T);
+      for (let i = 0; i < 14; i++) {
+        g.fillStyle(i % 2 ? 0x5e9c47 : 0x427a33).fillRect((i * 13) % 30, (i * 7) % 30, 2, 2);
+      }
+    });
+    make('fallback-pavement', T, T, g => {
+      g.fillStyle(0xbab3a8).fillRect(0, 0, T, T);
+      g.fillStyle(0xa39c91).fillRect(0, 15, T, 1).fillRect(15, 0, 1, T);
+    });
+  }
+
+  private buildWalkAnimations() {
+    for (const dir of FACINGS) {
+      const frames = [0, 1, 2, 3].map(i => `player-walk-${dir}-${i}`);
+      if (!frames.every(k => this.has(k))) continue;
+      if (!this.anims.exists(`walk-${dir}`)) {
+        this.anims.create({
+          key: `walk-${dir}`,
+          frames: frames.map(key => ({ key })),
+          frameRate: 10,
+          repeat: -1,
+        });
+      }
+      this.walkAnims.add(dir);
+    }
+  }
+
+  // --- Terrain -----------------------------------------------------------------
+
+  /** Paint a region with a Wang tileset, given which map vertices are "upper". */
+  private paintWang(
+    sheet: string,
+    lookupKey: string,
+    tiles: Iterable<[number, number]>,
+    isUpper: (vx: number, vy: number) => boolean,
+    depth: number,
+  ) {
+    const lookup = this.cache.json.get(lookupKey) as Record<string, number> | undefined;
+    if (!lookup) return false;
+    const ch = (b: boolean) => (b ? 'u' : 'l');
+    for (const [c, r] of tiles) {
+      const key = ch(isUpper(c, r)) + ch(isUpper(c + 1, r)) + ch(isUpper(c, r + 1)) + ch(isUpper(c + 1, r + 1));
+      const frame = lookup[key] ?? lookup.llll;
+      this.add.image(c * T + T / 2, r * T + T / 2, sheet, frame).setDepth(depth);
+    }
+    return true;
+  }
+
+  private drawHallFloor() {
+    const tiles: [number, number][] = [];
+    for (let r = FY; r < FY + ROWS; r++) for (let c = FX; c < FX + COLS; c++) tiles.push([c, r]);
+
+    // Carpet covers the pit (backend 8..11 x 4..7) using vertex corners.
+    const pitUpper = (vx: number, vy: number) =>
+      vx >= FX + PIT.minX && vx <= FX + PIT.maxX + 1 && vy >= FY + PIT.minY && vy <= FY + PIT.maxY + 1;
+
+    const ok =
+      this.has('floor') && this.paintWang('floor', 'floor-wang', tiles, pitUpper, -1000);
+    if (!ok) {
+      for (const [c, r] of tiles) {
+        const inPit = c - FX >= PIT.minX && c - FX <= PIT.maxX && r - FY >= PIT.minY && r - FY <= PIT.maxY;
+        this.add.image(c * T + T / 2, r * T + T / 2, inPit ? 'fallback-carpet' : 'fallback-stone').setDepth(-1000);
+      }
+    }
+
+    // Soft shadow cast by the north wall onto the floor.
+    const shadow = this.add.graphics().setDepth(-990);
+    shadow.fillStyle(0x000000, 0.28).fillRect(FX * T, FY * T, COLS * T, 6);
+    shadow.fillStyle(0x000000, 0.12).fillRect(FX * T, FY * T + 6, COLS * T, 6);
+  }
+
+  private drawExterior() {
+    // Pavement ring around the building, a walkway south, and side paths.
+    const pavement = (vx: number, vy: number) =>
+      (vx >= FX - 3 && vx <= FX + COLS + 3 && vy >= FY - 5 && vy <= FY + ROWS + 4) ||
+      (vx >= 17 && vx <= 23 && vy >= FY + ROWS + 4) ||
+      (vy >= 12 && vy <= 14 && (vx <= FX - 3 || vx >= FX + COLS + 3));
+
+    const tiles: [number, number][] = [];
+    for (let r = 0; r < MAP_H; r++) for (let c = 0; c < MAP_W; c++) tiles.push([c, r]);
+
+    const ok = this.has('plaza') && this.paintWang('plaza', 'plaza-wang', tiles, pavement, -1100);
+    if (!ok) {
+      for (const [c, r] of tiles) {
+        const paved = pavement(c, r) && pavement(c + 1, r + 1);
+        this.add.image(c * T + T / 2, r * T + T / 2, paved ? 'fallback-pavement' : 'fallback-grass').setDepth(-1100);
+      }
+    }
+
+    // Scatter flowers on the lawn.
+    for (let r = 0; r < MAP_H; r++) {
+      for (let c = 0; c < MAP_W; c++) {
+        const lawn = !pavement(c, r) && !pavement(c + 1, r) && !pavement(c, r + 1) && !pavement(c + 1, r + 1);
+        if (lawn && hash(c, r) > 0.82) {
+          this.add.image(c * T + 8 + hash(r, c) * 16, r * T + 8 + hash(c + 7, r) * 16, 'flowers').setDepth(-1050);
         }
       }
     }
 
-    // Room borders (subtle neon boundary)
-    const bounds = this.add.graphics();
-    bounds.lineStyle(2, 0x3b82f6, 0.4);
-    bounds.strokeRect(
-      1,
-      TradingPitScene.TILE_SIZE + TradingPitScene.OFFSET_Y,
-      TradingPitScene.COLS * TradingPitScene.TILE_SIZE - 2,
-      (TradingPitScene.ROWS - 1) * TradingPitScene.TILE_SIZE - 2
-    );
-  }
-
-  /**
-   * Builds the 4x4 Trading Pit in the center (cols 8..11, rows 4..7)
-   */
-  private createTradingPit() {
-    const startX = TradingPitScene.PIT_MIN_X * TradingPitScene.TILE_SIZE;
-    const startY = TradingPitScene.PIT_MIN_Y * TradingPitScene.TILE_SIZE + TradingPitScene.OFFSET_Y;
-    const width = 4 * TradingPitScene.TILE_SIZE;
-    const height = 4 * TradingPitScene.TILE_SIZE;
-
-    // Pit carpet tiles
-    for (let r = TradingPitScene.PIT_MIN_Y; r <= TradingPitScene.PIT_MAX_Y; r++) {
-      for (let c = TradingPitScene.PIT_MIN_X; c <= TradingPitScene.PIT_MAX_X; c++) {
-        const x = c * TradingPitScene.TILE_SIZE + 16;
-        const y = r * TradingPitScene.TILE_SIZE + 16 + TradingPitScene.OFFSET_Y;
-        this.add.image(x, y, 'tex_pit_floor');
-      }
-    }
-
-    // Pit Brass / Neon Railing
-    const railing = this.add.graphics();
-    railing.lineStyle(3, 0xf59e0b, 0.9); // Gold brass railing
-    railing.strokeRect(startX + 2, startY + 2, width - 4, height - 4);
-
-    // Glowing inner neon outline
-    railing.lineStyle(1, 0x10b981, 0.7);
-    railing.strokeRect(startX + 6, startY + 6, width - 12, height - 12);
-
-    // Corner brass posts
-    const corners = [
-      { x: startX + 3, y: startY + 3 },
-      { x: startX + width - 3, y: startY + 3 },
-      { x: startX + 3, y: startY + height - 3 },
-      { x: startX + width - 3, y: startY + height - 3 },
+    // Trees on the lawn, lamps and benches on the pavement, the bull out front.
+    const trees: [number, number][] = [
+      [2, 2], [5, 5], [2, 9], [4, 17], [2, 21], [6, 24], [11, 1], [29, 1],
+      [35, 2], [38, 6], [36, 10], [38, 17], [35, 21], [33, 24], [14, 25], [26, 25],
+      [1, 15], [38, 14],
     ];
-    corners.forEach(cp => {
-      railing.fillStyle(0xf59e0b, 1);
-      railing.fillCircle(cp.x, cp.y, 4);
-      railing.fillStyle(0x10b981, 1);
-      railing.fillCircle(cp.x, cp.y, 2);
-    });
+    for (const [c, r] of trees) this.placeProp('tree', c * T + T / 2, r * T + T, 1);
 
-    // Central Pit Emblem Text
-    const pitCenterText = this.add.text(
-      startX + width / 2,
-      startY + height / 2 - 8,
-      'TRADING PIT\nCLOB',
-      {
-        fontFamily: '"Press Start 2P", monospace',
-        fontSize: '9px',
-        color: '#10b981',
-        align: 'center',
-      }
-    );
-    pitCenterText.setOrigin(0.5);
-    pitCenterText.setAlpha(0.65);
+    const lamps: [number, number][] = [
+      [FX - 2, FY - 4], [FX + COLS + 1, FY - 4], [FX - 2, FY + ROWS + 2], [FX + COLS + 1, FY + ROWS + 2],
+      [16, FY + ROWS + 4], [24, FY + ROWS + 4], [FX - 2, FY + 4], [FX + COLS + 1, FY + 4],
+    ];
+    for (const [c, r] of lamps) this.placeProp('lamp', c * T + T / 2, r * T + T, 1);
+
+    const benches: [number, number][] = [
+      [12, FY + ROWS + 2], [27, FY + ROWS + 2], [12, FY - 4], [27, FY - 4],
+    ];
+    for (const [c, r] of benches) this.placeProp('bench', c * T + T, r * T + T, 1);
+
+    this.placeProp('bull', 20 * T, (FY + ROWS + 3) * T + 8, 1);
   }
 
-  /**
-   * Creates the Wall Street LED Ticker Board on Row 0
-   */
-  private createTickerBoard() {
-    const bg = this.add.graphics();
-    bg.fillStyle(0x020617, 0.95);
-    bg.fillRect(8, 4, 640 - 16, 24);
-    bg.lineStyle(1, 0x10b981, 0.8);
-    bg.strokeRect(8, 4, 640 - 16, 24);
-
-    this.tickerBanner = '★ CAL HACKS 13.0 FLOOR OPEN ★ WALK INTO PIT & PRESS [E] TO TRADE ★ 1 YES + 1 NO = $1.00 ★';
-    this.tickerText = this.add.text(640, 9, this.tickerBanner, {
-      fontFamily: '"Press Start 2P", monospace',
-      fontSize: '8px',
-      color: '#34d399',
-    });
-
-    // Animate ticker scrolling from right to left
-    this.tweens.add({
-      targets: this.tickerText,
-      x: -800,
-      duration: 16000,
-      repeat: -1,
-      ease: 'Linear',
-    });
+  private drawWalls() {
+    const top = FY - 3; // wall cap row
+    for (let c = FX - 1; c <= FX + COLS; c++) {
+      this.add.image(c * T + T / 2, top * T + T / 2, 'wall-cap').setDepth(-900);
+    }
+    for (let c = FX; c < FX + COLS; c++) {
+      this.add.image(c * T + T / 2, (top + 1) * T, 'wall-face').setOrigin(0.5, 0).setDepth(-900);
+    }
+    for (let c = FX; c <= FX + COLS; c += 5) {
+      this.add.image(c * T, (top + 1) * T, 'wall-pilaster').setOrigin(0.5, 0).setDepth(-899);
+    }
+    for (let r = top + 1; r <= FY + ROWS; r++) {
+      this.add.image((FX - 1) * T + T / 2, r * T + T / 2, 'wall-cap-v').setDepth(-900);
+      this.add.image((FX + COLS) * T + T / 2, r * T + T / 2, 'wall-cap-v').setDepth(-900);
+    }
+    // South wall sits in front of players standing on the bottom row.
+    const southY = (FY + ROWS) * T + T / 2;
+    for (let c = FX - 1; c <= FX + COLS; c++) {
+      this.add.image(c * T + T / 2, southY, 'wall-cap').setDepth(southY + T);
+    }
+    // Ground shadow along the outside of the building.
+    const g = this.add.graphics().setDepth(-1040);
+    g.fillStyle(0x000000, 0.18);
+    g.fillRect((FX - 1) * T, (FY + ROWS + 1) * T, (COLS + 2) * T, 8);
+    g.fillRect((FX + COLS + 1) * T, top * T + 8, 8, (ROWS + 4) * T);
   }
 
-  /**
-   * Updates ticker text from active market state
-   */
+  // --- Wall boards -------------------------------------------------------------
+
+  private panel(x: number, y: number, w: number, h: number) {
+    const g = this.add.graphics().setDepth(-880);
+    g.fillStyle(0x2a2633).fillRect(x - 2, y - 2, w + 4, h + 4);
+    g.fillStyle(0x8d8a99).fillRect(x - 1, y - 1, w + 2, h + 2);
+    g.fillStyle(0x0b0d14).fillRect(x, y, w, h);
+    // LED dot grid
+    g.fillStyle(0x16202a);
+    for (let px = x + 2; px < x + w - 1; px += 3) {
+      for (let py = y + 2; py < y + h - 1; py += 3) g.fillRect(px, py, 1, 1);
+    }
+    // mounting bolts
+    g.fillStyle(0xcfd2dc).fillRect(x - 1, y - 1, 2, 2).fillRect(x + w - 1, y - 1, 2, 2);
+    return g;
+  }
+
+  private text(x: number, y: number, value: string, size: number, color: string) {
+    // Render text at 4x and scale down with linear filtering so it stays
+    // smooth at any camera zoom.
+    const t = this.add.text(x, y, value, {
+      fontFamily: FONT,
+      fontSize: `${size * 4}px`,
+      color,
+    });
+    t.setScale(0.25);
+    t.texture.setFilter(Phaser.Textures.FilterMode.LINEAR);
+    return t;
+  }
+
+  private drawBoards() {
+    const faceTop = (FY - 2) * T;
+
+    // Scrolling ticker across the middle of the wall.
+    const tx = (FX + 3) * T + 6;
+    const tw = (COLS - 6) * T - 12;
+    this.panel(tx, faceTop + 14, tw, 18);
+    this.tickerWidthChars = Math.floor((tw - 8) / 6);
+    this.tickerText = this.text(tx + 4, faceTop + 20, '', 6, '#45f08a').setDepth(-870);
+    this.setTicker('CAL HACKS 13.0 * OPEN OUTCRY EXCHANGE * WALK INTO THE PIT AND PRESS [E] TO TRADE * 1 YES + 1 NO = $1.00');
+    this.time.addEvent({
+      delay: 140,
+      loop: true,
+      callback: () => {
+        if (!this.tickerMessage) return;
+        this.tickerOffset = (this.tickerOffset + 1) % this.tickerMessage.length;
+        const doubled = this.tickerMessage + this.tickerMessage;
+        this.tickerText.setText(doubled.slice(this.tickerOffset, this.tickerOffset + this.tickerWidthChars));
+      },
+    });
+
+    // YES / NO price boards either side.
+    const bw = 2 * T + 8;
+    const leftX = FX * T + 14;
+    const rightX = (FX + COLS) * T - 14 - bw;
+    this.panel(leftX, faceTop + 6, bw, 34);
+    this.panel(rightX, faceTop + 6, bw, 34);
+    this.text(leftX + 4, faceTop + 10, 'YES', 5, '#45f08a').setDepth(-870);
+    this.text(rightX + 4, faceTop + 10, 'NO', 5, '#ff6b6b').setDepth(-870);
+    this.yesPriceText = this.text(leftX + bw - 4, faceTop + 21, '50¢', 8, '#45f08a').setOrigin(1, 0).setDepth(-870);
+    this.noPriceText = this.text(rightX + bw - 4, faceTop + 21, '50¢', 8, '#ff6b6b').setOrigin(1, 0).setDepth(-870);
+  }
+
+  private setTicker(message: string) {
+    this.tickerMessage = `${message}   ***   `;
+    this.tickerOffset = 0;
+  }
+
   public updateMarketTicker(question: string, lastPrice: number, volume: number) {
     if (!this.tickerText) return;
-    this.tickerBanner = `★ ${question.toUpperCase()} ★ LAST: ${lastPrice}¢ (YES ${lastPrice}% | NO ${100 - lastPrice}%) ★ VOL: ${volume} ★ PRESS [E] IN PIT TO TRADE ★`;
-    this.tickerText.setText(this.tickerBanner);
-  }
-
-  /**
-   * Creates floating retro "[PRESS E TO ENTER PIT]" prompt
-   */
-  private createPitPrompt() {
-    this.pitPromptContainer = this.add.container(
-      (TradingPitScene.PIT_MIN_X + 2) * TradingPitScene.TILE_SIZE,
-      TradingPitScene.PIT_MIN_Y * TradingPitScene.TILE_SIZE - 6 + TradingPitScene.OFFSET_Y
+    this.setTicker(
+      `${question.toUpperCase()} * LAST ${lastPrice}¢ * YES ${lastPrice}% / NO ${100 - lastPrice}% * VOL ${volume} * PRESS [E] IN THE PIT TO TRADE`,
     );
+    this.yesPriceText.setText(`${lastPrice}¢`);
+    this.noPriceText.setText(`${100 - lastPrice}¢`);
+  }
 
-    const bg = this.add.graphics();
-    bg.fillStyle(0x0f172a, 0.92);
-    bg.fillRoundedRect(-95, -12, 190, 24, 6);
-    bg.lineStyle(1.5, 0xfacc15, 1);
-    bg.strokeRoundedRect(-95, -12, 190, 24, 6);
+  // --- Pit & furniture -----------------------------------------------------------
 
-    const txt = this.add.text(0, 0, 'PRESS [E] TO TRADE', {
-      fontFamily: '"Press Start 2P", monospace',
-      fontSize: '8px',
-      color: '#facc15',
-    });
-    txt.setOrigin(0.5);
+  private drawPitRailing() {
+    const x0 = (FX + PIT.minX) * T - 4;
+    const x1 = (FX + PIT.maxX + 1) * T + 4;
+    const y0 = (FY + PIT.minY) * T - 4;
+    const y1 = (FY + PIT.maxY + 1) * T + 4;
+    const gapA = (FX + PIT.minX + 1) * T + 8;
+    const gapB = (FX + PIT.maxX) * T - 8;
+    const gapTop = (FY + PIT.minY + 1) * T + 8;
+    const gapBot = (FY + PIT.maxY) * T - 8;
 
-    this.pitPromptContainer.add([bg, txt]);
-    this.pitPromptContainer.setVisible(false);
-    this.pitPromptContainer.setDepth(100);
+    const rope = (g: Phaser.GameObjects.Graphics, ax: number, ay: number, bx: number, by: number) => {
+      g.fillStyle(0x6b1020).fillRect(Math.min(ax, bx), Math.min(ay, by), Math.abs(bx - ax) || 2, Math.abs(by - ay) || 2);
+      g.fillStyle(0xb8243b).fillRect(Math.min(ax, bx), Math.min(ay, by) - 1, Math.abs(bx - ax) || 1, Math.abs(by - ay) || 1);
+    };
+    const post = (g: Phaser.GameObjects.Graphics, x: number, y: number) => {
+      g.fillStyle(0x000000, 0.25).fillEllipse(x, y + 1, 10, 4);
+      g.fillStyle(0x7a5a12).fillRect(x - 2, y - 12, 4, 12);
+      g.fillStyle(0xe8c252).fillRect(x - 1, y - 12, 2, 11);
+      g.fillStyle(0xffe58a).fillCircle(x, y - 13, 2.5);
+    };
 
-    // Floating bob animation
-    this.tweens.add({
-      targets: this.pitPromptContainer,
-      y: this.pitPromptContainer.y - 4,
-      duration: 600,
-      yoyo: true,
-      repeat: -1,
-      ease: 'Sine.easeInOut',
+    // Side ropes lie flat at floor level; top/bottom are y-sorted.
+    const sides = this.add.graphics().setDepth(-980);
+    rope(sides, x0, y0 - 8, x0, gapTop - 8);
+    rope(sides, x0, gapBot - 8, x0, y1 - 8);
+    rope(sides, x1, y0 - 8, x1, gapTop - 8);
+    rope(sides, x1, gapBot - 8, x1, y1 - 8);
+
+    const topRail = this.add.graphics().setDepth(y0);
+    rope(topRail, x0, y0 - 8, gapA, y0 - 8);
+    rope(topRail, gapB, y0 - 8, x1, y0 - 8);
+    [x0, gapA, gapB, x1].forEach(x => post(topRail, x, y0));
+    post(topRail, x0, gapTop);
+    post(topRail, x1, gapTop);
+
+    const botRail = this.add.graphics().setDepth(y1);
+    rope(botRail, x0, y1 - 8, gapA, y1 - 8);
+    rope(botRail, gapB, y1 - 8, x1, y1 - 8);
+    [x0, gapA, gapB, x1].forEach(x => post(botRail, x, y1));
+    post(botRail, x0, gapBot);
+    post(botRail, x1, gapBot);
+  }
+
+  private placeProp(key: PropKey, x: number, y: number, originY: number) {
+    const tex = `prop-${key}`;
+    if (this.has(tex)) {
+      return this.add.image(x, y, tex).setOrigin(0.5, originY).setDepth(y);
+    }
+    // Simple stand-in so the layout still reads if an asset is missing.
+    const g = this.add.graphics().setDepth(y);
+    const colors: Record<PropKey, number> = {
+      desk: 0x6b4a2f, plant: 0x2f7a3a, post: 0x2a2633, bull: 0x8a5a2b, lamp: 0x3a3a48, bench: 0x9a6b3c, tree: 0x2f6b2a,
+    };
+    const size: Record<PropKey, [number, number]> = {
+      desk: [56, 30], plant: [18, 28], post: [52, 52], bull: [48, 30], lamp: [6, 48], bench: [52, 14], tree: [44, 56],
+    };
+    const [w, h] = size[key];
+    g.fillStyle(colors[key]).fillRect(x - w / 2, y - h, w, h);
+    return g;
+  }
+
+  private placeFurniture() {
+    const deskXs = [1, 4, 14, 17];
+    for (const bx of deskXs) this.placeProp('desk', (FX + bx + 1) * T, (FY + 1) * T - 2, 1);
+
+    const plants: [number, number][] = [[0, 0], [19, 0], [0, 10], [19, 10]];
+    for (const [bx, by] of plants) this.placeProp('plant', wx(bx), (FY + by + 1) * T - 2, 1);
+
+    // Trading post in the middle of the pit.
+    this.placeProp('post', (FX + 10) * T, (FY + 7) * T - 2, 1);
+  }
+
+  private createPitHint() {
+    this.pitHint = this.makeBubble('Press E to trade!', '#1d1b2a');
+    this.pitHint.setPosition((FX + 10) * T, (FY + PIT.minY) * T - 10).setDepth(100000).setVisible(false);
+    this.ignoreOnMinimap(this.pitHint);
+    this.tweens.add({ targets: this.pitHint, y: this.pitHint.y - 3, duration: 650, yoyo: true, repeat: -1, ease: 'Sine.easeInOut' });
+  }
+
+  // --- Speech bubbles ------------------------------------------------------------
+
+  private makeBubble(message: string, color: string) {
+    const label = this.text(0, 0, message, 6, color).setOrigin(0.5, 1);
+    const padX = 5;
+    const padY = 4;
+    const w = Math.ceil(label.displayWidth) + padX * 2;
+    const h = Math.ceil(label.displayHeight) + padY * 2;
+    label.setPosition(0, -6 - padY + 1);
+
+    const g = this.add.graphics();
+    const left = -Math.round(w / 2);
+    const topY = -6 - h;
+    g.fillStyle(0x000000, 0.25).fillRect(left + 2, topY + 2, w, h);
+    g.fillStyle(0x1d1b2a).fillRect(left - 1, topY - 1, w + 2, h + 2);
+    g.fillStyle(0xffffff).fillRect(left, topY, w, h);
+    // pointer
+    g.fillStyle(0x1d1b2a).fillTriangle(-5, -7, 5, -7, 0, -1);
+    g.fillStyle(0xffffff).fillTriangle(-3, -7, 3, -7, 0, -3);
+
+    return this.add.container(0, 0, [g, label]);
+  }
+
+  public say(identityHex: string, message: string, color = INK, durationMs = 2600) {
+    const avatar = identityHex === this.myIdentityHex ? this.local : this.avatars.get(identityHex);
+    if (!avatar) return;
+    avatar.bubbleTimer?.remove();
+    avatar.bubble?.destroy();
+    const bubble = this.makeBubble(message, color);
+    bubble.setPosition(0, -29);
+    avatar.overhead.add(bubble);
+    avatar.bubble = bubble;
+    bubble.setScale(0.6);
+    this.tweens.add({ targets: bubble, scale: 1, duration: 140, ease: 'Back.easeOut' });
+    avatar.bubbleTimer = this.time.delayedCall(durationMs, () => {
+      this.tweens.add({
+        targets: bubble,
+        alpha: 0,
+        duration: 250,
+        onComplete: () => {
+          bubble.destroy();
+          if (avatar.bubble === bubble) avatar.bubble = null;
+        },
+      });
     });
   }
 
-  /**
-   * Creates the local player sprite & container
-   */
-  private createLocalPlayerSprite() {
-    const x = this.localGridX * TradingPitScene.TILE_SIZE + 16;
-    const y = this.localGridY * TradingPitScene.TILE_SIZE + 16 + TradingPitScene.OFFSET_Y;
-
-    this.localPlayerContainer = this.add.container(x, y);
-    this.localPlayerContainer.setDepth(50);
-
-    // Glowing halo under local player feet
-    const halo = this.add.graphics();
-    halo.fillStyle(0x38bdf8, 0.35);
-    halo.fillCircle(0, 14, 12);
-    halo.lineStyle(1, 0x38bdf8, 0.8);
-    halo.strokeCircle(0, 14, 12);
-
-    const sprite = this.add.sprite(0, 0, 'tex_trader');
-
-    // Local player nameplate
-    const nameText = this.add.text(0, -22, 'YOU (Trader)', {
-      fontFamily: '"Press Start 2P", monospace',
-      fontSize: '7px',
-      color: '#38bdf8',
-      align: 'center',
-    });
-    nameText.setOrigin(0.5);
-    nameText.setStroke('#020617', 2);
-
-    this.localPlayerContainer.add([halo, sprite, nameText]);
+  /** Floating "+10 YES @ 52¢" style text over the trading post. */
+  public triggerTradeExecutionEffect(price: number, qty: number) {
+    const t = this.text((FX + 10) * T, (FY + 5) * T, `${qty} @ ${price}¢`, 6, '#ffe066')
+      .setOrigin(0.5)
+      .setDepth(100001)
+      .setStroke('#1d1b2a', 12);
+    this.ignoreOnMinimap(t);
+    this.tweens.add({ targets: t, y: t.y - 24, alpha: 0, duration: 1400, ease: 'Cubic.easeOut', onComplete: () => t.destroy() });
   }
 
-  /**
-   * Syncs players list from SpacetimeDB
-   */
-  public syncPlayers(players: PlayerData[], myIdentityHex: string) {
-    this.myIdentityHex = myIdentityHex;
-    const currentKeys = new Set<string>();
+  // --- Minimap -------------------------------------------------------------------
 
-    players.forEach(p => {
-      currentKeys.add(p.identityHex);
-      const isLocal = p.identityHex === this.myIdentityHex;
-
-      if (isLocal) {
-        // If local player moved remotely or initial sync
-        if (!this.isMoving && (p.x !== this.localGridX || p.y !== this.localGridY)) {
-          this.localGridX = p.x;
-          this.localGridY = p.y;
-          const targetPxX = p.x * TradingPitScene.TILE_SIZE + 16;
-          const targetPxY = p.y * TradingPitScene.TILE_SIZE + 16 + TradingPitScene.OFFSET_Y;
-          this.localPlayerContainer.setPosition(targetPxX, targetPxY);
-          this.checkPitProximity(this.localGridX, this.localGridY);
-        }
-        return;
-      }
-
-      // Remote player or Bot
-      let container = this.playerContainers.get(p.identityHex);
-      const targetPxX = p.x * TradingPitScene.TILE_SIZE + 16;
-      const targetPxY = p.y * TradingPitScene.TILE_SIZE + 16 + TradingPitScene.OFFSET_Y;
-
-      if (!container) {
-        // Instantiate remote player
-        container = this.add.container(targetPxX, targetPxY);
-        container.setDepth(45);
-
-        const isWhale = p.isBot || p.username.toLowerCase().includes('whale') || p.username.toLowerCase().includes('bot');
-        const spriteKey = isWhale ? 'tex_whale_bot' : 'tex_trader';
-        const sprite = this.add.sprite(0, 0, spriteKey);
-
-        const tagColor = isWhale ? '#f59e0b' : '#94a3b8';
-        const displayName = p.username || (isWhale ? 'THE WHALE' : `Trader_${p.identityHex.slice(0, 4)}`);
-
-        const nameText = this.add.text(0, -22, displayName, {
-          fontFamily: '"Press Start 2P", monospace',
-          fontSize: '6px',
-          color: tagColor,
-          align: 'center',
-        });
-        nameText.setOrigin(0.5);
-        nameText.setStroke('#020617', 2);
-
-        container.add([sprite, nameText]);
-        this.playerContainers.set(p.identityHex, container);
-      } else {
-        // Tween to new position smoothly
-        if (Math.abs(container.x - targetPxX) > 2 || Math.abs(container.y - targetPxY) > 2) {
-          this.tweens.add({
-            targets: container,
-            x: targetPxX,
-            y: targetPxY,
-            duration: 130,
-            ease: 'Linear',
-          });
-        }
-      }
-    });
-
-    // Remove disconnected players
-    this.playerContainers.forEach((container, id) => {
-      if (!currentKeys.has(id)) {
-        container.destroy();
-        this.playerContainers.delete(id);
-      }
-    });
+  private createMinimap() {
+    const { width, height } = MINIMAP_RECT;
+    const zoom = Math.min(width / (MAP_W * T), height / (MAP_H * T));
+    this.minimap = this.cameras
+      .add(0, 0, width, height, false, 'minimap')
+      .setZoom(zoom)
+      .setBackgroundColor('#1b2a1b')
+      .centerOn((MAP_W * T) / 2, (MAP_H * T) / 2);
   }
 
-  /**
-   * Game loop: checks player movement inputs
-   */
-  public override update() {
-    if (this.isMoving) return;
+  private ignoreOnMinimap(obj: Phaser.GameObjects.GameObject) {
+    this.minimap?.ignore(obj);
+  }
 
-    let dx = 0;
-    let dy = 0;
-    let direction = this.localDirection;
+  // --- Avatars -------------------------------------------------------------------
 
-    // Up
-    if (this.cursors.up.isDown || this.wasd?.W.isDown) {
-      dy = -1;
-      direction = 'up';
-    }
-    // Down
-    else if (this.cursors.down.isDown || this.wasd?.S.isDown) {
-      dy = 1;
-      direction = 'down';
-    }
-    // Left
-    else if (this.cursors.left.isDown || this.wasd?.A.isDown) {
-      dx = -1;
-      direction = 'left';
-    }
-    // Right
-    else if (this.cursors.right.isDown || this.wasd?.D.isDown) {
-      dx = 1;
-      direction = 'right';
-    }
+  private textureFor(kind: AgentKind, facing: Facing) {
+    if (kind !== 'human' && this.has(`${kind}-${facing}`)) return `${kind}-${facing}`;
+    return this.has(`player-${facing}`) ? `player-${facing}` : `player-south`;
+  }
 
-    if (dx !== 0 || dy !== 0) {
-      this.attemptMove(dx, dy, direction);
+  private usesOwnSprite(kind: AgentKind) {
+    return kind !== 'human' && this.has(`${kind}-south`);
+  }
+
+  private createAvatar(id: string, name: string, kind: AgentKind, gx: number, gy: number, facing: Facing): Avatar {
+    const body = this.add.container(wx(gx), wy(gy));
+    const shadow = this.add.ellipse(0, 14, 18, 6, 0x000000, 0.3);
+    const sprite = this.add.sprite(0, 16, this.textureFor(kind, facing)).setOrigin(0.5, 1);
+    const style = AGENT_STYLE[kind];
+    if (style.tint !== null && !this.usesOwnSprite(kind)) sprite.setTint(style.tint);
+    body.add([shadow, sprite]);
+    body.setDepth(body.y + 16);
+
+    const overhead = this.add.container(body.x, body.y).setDepth(100000);
+    const label = style.tag ? `${name} [${style.tag}]` : name;
+    const nameText = this.nameLabel(label, style.nameColor);
+    overhead.add(nameText);
+    this.ignoreOnMinimap(overhead);
+
+    const markerColor = kind === 'human' ? 0xff3b3b : kind === 'claude' ? 0xff9a5c : 0x4fc3ff;
+    const marker = this.add.rectangle(body.x, body.y, 26, 26, markerColor).setStrokeStyle(4, 0xffffff).setDepth(200000);
+    this.cameras.main.ignore(marker);
+
+    return {
+      identityHex: id,
+      kind,
+      body,
+      sprite,
+      overhead,
+      nameText,
+      marker,
+      bubble: null,
+      bubbleTimer: null,
+      facing,
+      gridX: gx,
+      gridY: gy,
+      moveTween: null,
+    };
+  }
+
+  private nameLabel(label: string, color: string) {
+    return this.text(0, -20, label, 5, color).setOrigin(0.5, 1).setStroke(INK, 10);
+  }
+
+  /** Swap an avatar's name label; text objects are rebuilt rather than resized. */
+  private setName(a: Avatar, label: string, color: string) {
+    if (a.nameText.text === label && a.nameText.style.color === color) return;
+    a.nameText.destroy();
+    a.nameText = this.nameLabel(label, color);
+    a.overhead.addAt(a.nameText, 0);
+  }
+
+  private destroyAvatar(a: Avatar) {
+    a.moveTween?.stop();
+    a.bubbleTimer?.remove();
+    a.body.destroy();
+    a.overhead.destroy();
+    a.marker.destroy();
+  }
+
+  private face(a: Avatar, facing: Facing) {
+    a.facing = facing;
+    if (!a.sprite.anims.isPlaying) a.sprite.setTexture(this.textureFor(a.kind, facing));
+  }
+
+  private startWalk(a: Avatar) {
+    if (!this.usesOwnSprite(a.kind) && this.walkAnims.has(a.facing)) {
+      a.sprite.play(`walk-${a.facing}`, true);
     }
   }
 
-  /**
-   * Attempts grid-aligned 1-tile movement with smooth tweening
-   */
-  private attemptMove(dx: number, dy: number, direction: string) {
-    const targetX = this.localGridX + dx;
-    const targetY = this.localGridY + dy;
+  private stopWalk(a: Avatar) {
+    a.sprite.anims.stop();
+    a.sprite.setTexture(this.textureFor(a.kind, a.facing));
+  }
 
-    // Bounds checking:
-    // x: 0 .. 19
-    // y: 1 .. 10 (row 0 is wall/ticker board)
-    if (targetX < 0 || targetX >= TradingPitScene.COLS || targetY < 1 || targetY >= TradingPitScene.ROWS) {
-      return;
-    }
-
-    this.isMoving = true;
-    this.localGridX = targetX;
-    this.localGridY = targetY;
-    this.localDirection = direction;
-
-    const targetPxX = targetX * TradingPitScene.TILE_SIZE + 16;
-    const targetPxY = targetY * TradingPitScene.TILE_SIZE + 16 + TradingPitScene.OFFSET_Y;
-
-    // Flip sprite horizontally if moving left/right
-    const sprite = this.localPlayerContainer.list.find(c => c instanceof Phaser.GameObjects.Sprite) as Phaser.GameObjects.Sprite;
-    if (sprite) {
-      if (direction === 'left') sprite.setFlipX(true);
-      else if (direction === 'right') sprite.setFlipX(false);
-    }
-
-    // Tween to target tile over 120ms
-    this.tweens.add({
-      targets: this.localPlayerContainer,
-      x: targetPxX,
-      y: targetPxY,
-      duration: 120,
+  private moveAvatarTo(a: Avatar, gx: number, gy: number, duration: number, onComplete?: () => void) {
+    a.gridX = gx;
+    a.gridY = gy;
+    a.moveTween?.stop();
+    this.startWalk(a);
+    a.moveTween = this.tweens.add({
+      targets: a.body,
+      x: wx(gx),
+      y: wy(gy),
+      duration,
       ease: 'Linear',
       onComplete: () => {
-        this.isMoving = false;
-        // Broadcast move to SpacetimeDB
-        this.configCallbacks.onPlayerMove?.(targetX, targetY, direction);
-        // Check pit proximity
-        this.checkPitProximity(targetX, targetY);
+        a.moveTween = null;
+        onComplete?.();
       },
     });
   }
 
-  /**
-   * Evaluates if player is within or adjacent to the Trading Pit
-   */
-  private checkPitProximity(x: number, y: number) {
-    const inside =
-      x >= TradingPitScene.PROX_MIN_X &&
-      x <= TradingPitScene.PROX_MAX_X &&
-      y >= TradingPitScene.PROX_MIN_Y &&
-      y <= TradingPitScene.PROX_MAX_Y;
+  /** Sync the roster from SpacetimeDB. */
+  public syncPlayers(players: PlayerData[], myIdentityHex: string) {
+    this.myIdentityHex = myIdentityHex;
+    if (!this.local) return;
+    const seen = new Set<string>();
 
-    if (inside !== this.isInsidePitProximity) {
-      this.isInsidePitProximity = inside;
-      this.pitPromptContainer.setVisible(inside);
-      this.configCallbacks.onProximityChange?.(inside);
+    for (const p of players) {
+      if (p.identityHex === myIdentityHex) {
+        this.local.identityHex = p.identityHex;
+        this.setName(this.local, `${p.username} (you)`, '#ffe066');
+        if (!this.localReady || (!this.isMoving && (p.x !== this.local.gridX || p.y !== this.local.gridY))) {
+          if (!this.isMoving) {
+            this.local.gridX = p.x;
+            this.local.gridY = p.y;
+            this.local.body.setPosition(wx(p.x), wy(p.y));
+            this.face(this.local, facingFor(p.direction));
+            this.checkPitProximity();
+          }
+        }
+        if (!this.localReady) {
+          this.localReady = true;
+          this.cameras.main.centerOn(this.local.body.x, this.local.body.y);
+          this.time.delayedCall(400, () => this.say(myIdentityHex, 'Welcome to the trading floor!', INK, 3600));
+        }
+        continue;
+      }
+
+      seen.add(p.identityHex);
+      let a = this.avatars.get(p.identityHex);
+      if (!a || a.kind !== p.kind) {
+        if (a) this.destroyAvatar(a);
+        a = this.createAvatar(p.identityHex, p.username, p.kind, p.x, p.y, facingFor(p.direction));
+        this.avatars.set(p.identityHex, a);
+      }
+
+      const style = AGENT_STYLE[p.kind];
+      this.setName(a, style.tag ? `${p.username} [${style.tag}]` : p.username, style.nameColor);
+
+      if (p.x !== a.gridX || p.y !== a.gridY) {
+        const dist = Math.abs(p.x - a.gridX) + Math.abs(p.y - a.gridY);
+        this.face(a, facingFor(p.direction));
+        const avatar = a;
+        this.moveAvatarTo(a, p.x, p.y, Math.min(600, STEP_MS * dist), () => this.stopWalk(avatar));
+      } else {
+        this.face(a, facingFor(p.direction));
+      }
+    }
+
+    for (const [id, a] of this.avatars) {
+      if (!seen.has(id)) {
+        this.destroyAvatar(a);
+        this.avatars.delete(id);
+      }
     }
   }
 
-  /**
-   * Spawns coin sparkle particles when a trade is executed in the pit
-   */
-  public triggerTradeExecutionEffect(price: number, qty: number) {
-    const pitCenterX = (TradingPitScene.PIT_MIN_X + 2) * TradingPitScene.TILE_SIZE;
-    const pitCenterY = (TradingPitScene.PIT_MIN_Y + 2) * TradingPitScene.TILE_SIZE + TradingPitScene.OFFSET_Y;
+  // --- Game loop -------------------------------------------------------------------
 
-    const burst = this.add.text(pitCenterX, pitCenterY, `⚡ FILLED: ${qty}x @ ${price}¢`, {
-      fontFamily: '"Press Start 2P", monospace',
-      fontSize: '8px',
-      color: '#34d399',
-    });
-    burst.setOrigin(0.5);
-    burst.setDepth(150);
+  public override update() {
+    const all = [this.local, ...this.avatars.values()];
+    for (const a of all) {
+      if (!a) continue;
+      a.body.setDepth(a.body.y + 16);
+      a.overhead.setPosition(a.body.x, a.body.y);
+      a.marker.setPosition(a.body.x, a.body.y);
+    }
+    if (this.local) this.local.marker.setFillStyle(0xffe066);
 
-    this.tweens.add({
-      targets: burst,
-      y: burst.y - 32,
-      alpha: 0,
-      duration: 1200,
-      ease: 'Power1',
-      onComplete: () => burst.destroy(),
+    if (this.isMoving || !this.inputEnabled || this.isTyping()) return;
+
+    const k = this.keys;
+    const c = this.cursors;
+    let dx = 0;
+    let dy = 0;
+    let direction = '';
+    if (c?.up.isDown || k?.W.isDown) [dy, direction] = [-1, 'up'];
+    else if (c?.down.isDown || k?.S.isDown) [dy, direction] = [1, 'down'];
+    else if (c?.left.isDown || k?.A.isDown) [dx, direction] = [-1, 'left'];
+    else if (c?.right.isDown || k?.D.isDown) [dx, direction] = [1, 'right'];
+    else if (this.virtualDirection) {
+      direction = this.virtualDirection;
+      dx = direction === 'left' ? -1 : direction === 'right' ? 1 : 0;
+      dy = direction === 'up' ? -1 : direction === 'down' ? 1 : 0;
+    }
+
+    if (direction) this.attemptMove(dx, dy, direction);
+    else if (this.local.sprite.anims.isPlaying) this.stopWalk(this.local);
+  }
+
+  private attemptMove(dx: number, dy: number, direction: string) {
+    const tx = this.local.gridX + dx;
+    const ty = this.local.gridY + dy;
+    const facing = facingFor(direction);
+
+    if (this.local.facing !== facing) {
+      this.local.facing = facing;
+      this.local.sprite.anims.stop();
+      this.local.sprite.setTexture(this.textureFor('human', facing));
+    }
+
+    if (tx < 0 || tx >= COLS || ty < 0 || ty >= ROWS || BLOCKED.has(`${tx},${ty}`)) {
+      if (this.local.sprite.anims.isPlaying) this.stopWalk(this.local);
+      return;
+    }
+
+    this.isMoving = true;
+    this.moveAvatarTo(this.local, tx, ty, STEP_MS, () => {
+      this.isMoving = false;
+      this.callbacks.onPlayerMove?.(tx, ty, direction);
+      this.checkPitProximity();
     });
+  }
+
+  private checkPitProximity() {
+    const { gridX: x, gridY: y } = this.local;
+    const inside = x >= PROX.minX && x <= PROX.maxX && y >= PROX.minY && y <= PROX.maxY;
+    if (inside !== this.inPit) {
+      this.inPit = inside;
+      this.pitHint.setVisible(inside);
+      this.callbacks.onProximityChange?.(inside);
+    }
   }
 }
