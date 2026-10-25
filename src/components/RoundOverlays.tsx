@@ -5,10 +5,17 @@ import { AVATARS, type AvatarType } from '../game/assets';
 export const formatCents = (cents: bigint | number) =>
   `$${(Number(cents) / 100).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
+export const pnlOf = (r: LeaderboardEntry) => Number(r.netWorthCents) - Number(r.startingCents);
+
+const formatPnl = (pnl: number) => `${pnl > 0 ? '+' : pnl < 0 ? '-' : ''}${formatCents(Math.abs(pnl))}`;
+
+/** Unique per row: bots share a placeholder identity and the whale has a row per room. */
+export const leaderboardKey = (r: LeaderboardEntry) =>
+  r.botId !== 0n ? `bot-${r.botId}` : `${r.identity.toHexString()}-${r.lobbyId}`;
+
+/** Ranked by P&L, so the whale's $5,000 bankroll doesn't put it on top by default. */
 export function rankLeaderboard(rows: readonly LeaderboardEntry[]) {
-  return [...rows].sort((a, b) =>
-    a.netWorthCents === b.netWorthCents ? a.username.localeCompare(b.username) : a.netWorthCents > b.netWorthCents ? -1 : 1
-  );
+  return [...rows].sort((a, b) => pnlOf(b) - pnlOf(a) || a.username.localeCompare(b.username));
 }
 
 /** Red breaking-news strip pushed by the instructor's broadcast_alert. */
@@ -54,7 +61,14 @@ export function LeaderboardReveal({
   onStartRound?: () => void;
 }) {
   const ranked = useMemo(() => rankLeaderboard(rows), [rows]);
-  const myIndex = ranked.findIndex(r => r.identity.toHexString() === myIdentityHex);
+  const myIndex = ranked.findIndex(r => r.botId === 0n && r.identity.toHexString() === myIdentityHex);
+  const avatarOf = (r: LeaderboardEntry): AvatarType => (r.botId !== 0n ? 'robot' : avatarFor(r.identity.toHexString()));
+  const tagOf = (r: LeaderboardEntry) =>
+    r.botId !== 0n ? (
+      <span className="ml-1 bg-sky-300 px-1 text-[7px]">BOT</span>
+    ) : (
+      r.isAi && <span className="ml-1 bg-amber-300 px-1 text-[7px]">AI</span>
+    );
 
   if (hidden) {
     return (
@@ -72,7 +86,7 @@ export function LeaderboardReveal({
         <div className="border-b-4 border-ink px-5 py-4 text-center">
           <div className="text-[9px] text-slate-500">THE BELL HAS RUNG</div>
           <div className="mt-3 text-[20px]">ROUND OVER</div>
-          <div className="mt-3 text-[9px] leading-relaxed text-slate-600">Trading is closed. Ranked by total net worth.</div>
+          <div className="mt-3 text-[9px] leading-relaxed text-slate-600">Trading is closed. Ranked by profit & loss.</div>
         </div>
 
         <div className="overflow-y-auto px-5 pb-5">
@@ -89,14 +103,17 @@ export function LeaderboardReveal({
                       {row ? (
                         <>
                           <img
-                            src={`${AVATARS[avatarFor(row.identity.toHexString())].dir}/idle/south.png`}
+                            src={`${AVATARS[avatarOf(row)].dir}/idle/south.png`}
                             alt=""
                             className={`h-16 w-16 object-contain object-bottom [image-rendering:pixelated] ${slot.place === 1 ? 'animate-bounce' : ''}`}
                           />
                           <div className="mt-2 w-full truncate text-center text-[9px]" title={row.username}>
                             {row.username}
+                            {tagOf(row)}
                           </div>
-                          <div className="mt-2 text-[10px] text-emerald-700">{formatCents(row.netWorthCents)}</div>
+                          <div className={`mt-2 text-[10px] ${pnlOf(row) < 0 ? 'text-rose-600' : 'text-emerald-700'}`}>
+                            {formatPnl(pnlOf(row))}
+                          </div>
                         </>
                       ) : (
                         <div className="h-16" />
@@ -115,11 +132,12 @@ export function LeaderboardReveal({
               {ranked.length > 3 && (
                 <div className="panel-inset mt-6 divide-y-2 divide-slate-300">
                   {ranked.slice(3, 10).map((r, i) => (
-                    <div key={r.identity.toHexString()} className="flex items-center justify-between px-3 py-2 text-[9px]">
+                    <div key={leaderboardKey(r)} className="flex items-center justify-between px-3 py-2 text-[9px]">
                       <span>
                         <span className="text-slate-500">#{i + 4}</span> {r.username}
+                        {tagOf(r)}
                       </span>
-                      <span className="text-emerald-700">{formatCents(r.netWorthCents)}</span>
+                      <span className={pnlOf(r) < 0 ? 'text-rose-600' : 'text-emerald-700'}>{formatPnl(pnlOf(r))}</span>
                     </div>
                   ))}
                 </div>
@@ -128,7 +146,9 @@ export function LeaderboardReveal({
               {myIndex >= 0 && (
                 <div className="mt-4 flex items-center justify-between border-4 border-ink bg-signblue px-3 py-3 text-[10px]">
                   <span>YOU FINISHED #{myIndex + 1}</span>
-                  <span>{formatCents(ranked[myIndex].netWorthCents)}</span>
+                  <span>
+                    {formatPnl(pnlOf(ranked[myIndex]))} · {formatCents(ranked[myIndex].netWorthCents)}
+                  </span>
                 </div>
               )}
             </>

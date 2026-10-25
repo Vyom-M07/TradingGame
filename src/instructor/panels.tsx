@@ -3,7 +3,7 @@ import { AlertTriangle } from 'lucide-react';
 import { useReducer } from 'spacetimedb/react';
 import { reducers } from '../module_bindings';
 import type { Clue, GameState, LeaderboardEntry, Lobby, Market, Order, Player } from '../module_bindings/types';
-import { formatCents } from '../components/RoundOverlays';
+import { formatCents, leaderboardKey, pnlOf } from '../components/RoundOverlays';
 
 /** Runs a reducer call and reports the outcome in the dashboard toast. */
 export type Run = (label: string, call: () => Promise<unknown>) => Promise<boolean>;
@@ -97,10 +97,10 @@ export function RoundControl({ lobby, run, studentCount }: { lobby: Lobby | null
 
 // --- Leaderboard ---------------------------------------------------------------
 
-const pnlOf = (r: LeaderboardEntry) => Number(r.netWorthCents) - Number(r.startingCents);
-
 /** Ranked by P&L, so the whale's $5,000 bankroll doesn't put it on top by default. */
-export function LeaderboardPanel({ rows }: { rows: readonly LeaderboardEntry[] }) {
+export function LeaderboardPanel({ rows, run }: { rows: readonly LeaderboardEntry[]; run: Run }) {
+  const kickPlayer = useReducer(reducers.kickPlayer);
+  const { armed, confirm } = useConfirm();
   const ranked = useMemo(
     () => [...rows].sort((a, b) => pnlOf(b) - pnlOf(a) || a.username.localeCompare(b.username)),
     [rows]
@@ -125,25 +125,47 @@ export function LeaderboardPanel({ rows }: { rows: readonly LeaderboardEntry[] }
                 <th className="py-2 pr-2 text-right">CASH</th>
                 <th className="py-2 pr-2 text-right">POSITIONS</th>
                 <th className="py-2 pr-2 text-right">NET WORTH</th>
-                <th className="py-2 text-right">P&L</th>
+                <th className="py-2 pr-2 text-right">P&L</th>
+                <th className="py-2" />
               </tr>
             </thead>
             <tbody>
               {ranked.map((r, i) => {
                 const pnl = pnlOf(r);
+                const key = leaderboardKey(r);
+                const kickArmed = armed === key;
                 return (
-                  <tr key={r.identity.toHexString()} className={`border-b-2 border-slate-200 ${i < 3 ? 'bg-amber-50' : ''}`}>
+                  <tr key={key} className={`border-b-2 border-slate-200 ${i < 3 ? 'bg-amber-50' : ''}`}>
                     <td className="py-2.5 pr-2">{['🥇', '🥈', '🥉'][i] ?? i + 1}</td>
                     <td className="max-w-[160px] truncate py-2.5 pr-2" title={r.username}>
                       {r.username}
-                      {r.isAi && <span className="ml-2 bg-amber-300 px-1 text-[7px]">AI</span>}
+                      {r.botId !== 0n ? (
+                        <span className="ml-2 bg-sky-300 px-1 text-[7px]">BOT</span>
+                      ) : (
+                        r.isAi && <span className="ml-2 bg-amber-300 px-1 text-[7px]">AI</span>
+                      )}
                     </td>
                     <td className="py-2.5 pr-2 text-right">{formatCents(r.cashCents)}</td>
                     <td className="py-2.5 pr-2 text-right">{formatCents(r.holdingsCents)}</td>
                     <td className="py-2.5 pr-2 text-right text-[10px]">{formatCents(r.netWorthCents)}</td>
-                    <td className={`py-2.5 text-right ${pnl > 0 ? 'text-emerald-700' : pnl < 0 ? 'text-rose-600' : 'text-slate-500'}`}>
+                    <td className={`py-2.5 pr-2 text-right ${pnl > 0 ? 'text-emerald-700' : pnl < 0 ? 'text-rose-600' : 'text-slate-500'}`}>
                       {pnl > 0 ? '+' : pnl < 0 ? '-' : ''}
                       {formatCents(Math.abs(pnl))}
+                    </td>
+                    <td className="py-2.5 text-right">
+                      {!r.isAi && (
+                        <button
+                          className={`border-2 border-ink px-1.5 py-1 text-[7px] ${kickArmed ? 'animate-pulse bg-rose-600 text-white' : 'bg-white hover:bg-rose-100'}`}
+                          title={`Send ${r.username} back to the menu`}
+                          onClick={() =>
+                            confirm(key, () =>
+                              void run(`${r.username} was kicked`, () => kickPlayer({ target: r.identity, lobbyId: r.lobbyId }))
+                            )
+                          }
+                        >
+                          {kickArmed ? 'SURE?' : 'KICK'}
+                        </button>
+                      )}
                     </td>
                   </tr>
                 );
@@ -154,7 +176,9 @@ export function LeaderboardPanel({ rows }: { rows: readonly LeaderboardEntry[] }
       )}
       <div className="mt-3 text-[7px] leading-relaxed text-slate-500">
         Net worth = cash + cash locked in open orders + positions valued at the order-book mid price. P&L is measured from
-        each trader's starting cash ($5,000 for the whale).
+        each trader's starting cash ($5,000 for the whale). Bots trade on the house's account and are scored on a notional
+        bankroll equal to the room's starting cash, counted from when the bots were last switched on. Kicking sends a
+        student back to the menu; they keep their cash and positions and can rejoin with the room code.
       </div>
     </Section>
   );

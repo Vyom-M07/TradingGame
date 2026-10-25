@@ -44,6 +44,7 @@ import CreateMarketReducer from "./create_market_reducer";
 import EndLobbyRoundReducer from "./end_lobby_round_reducer";
 import JoinGameReducer from "./join_game_reducer";
 import JoinLobbyReducer from "./join_lobby_reducer";
+import KickPlayerReducer from "./kick_player_reducer";
 import LeaveLobbyReducer from "./leave_lobby_reducer";
 import ModifyMarketReducer from "./modify_market_reducer";
 import MovePlayerReducer from "./move_player_reducer";
@@ -266,6 +267,7 @@ const reducersSchema = __reducers(
   __reducerSchema("end_lobby_round", EndLobbyRoundReducer),
   __reducerSchema("join_game", JoinGameReducer),
   __reducerSchema("join_lobby", JoinLobbyReducer),
+  __reducerSchema("kick_player", KickPlayerReducer),
   __reducerSchema("leave_lobby", LeaveLobbyReducer),
   __reducerSchema("modify_market", ModifyMarketReducer),
   __reducerSchema("move_player", MovePlayerReducer),

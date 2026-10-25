@@ -19,4 +19,5 @@ export default __t.row({
   lobbyId: __t.u64().name("lobby_id"),
   isAi: __t.bool().name("is_ai"),
   startingCents: __t.u64().name("starting_cents"),
+  botId: __t.u64().name("bot_id"),
 });

@@ -42,6 +42,9 @@ export const BotTrader = __t.object("BotTrader", {
   direction: __t.string(),
   tradeCount: __t.u32(),
   lobbyId: __t.u64(),
+  spentCents: __t.i64(),
+  yesShares: __t.u32(),
+  noShares: __t.u32(),
 });
 export type BotTrader = __Infer<typeof BotTrader>;
 
@@ -88,6 +91,7 @@ export const LeaderboardEntry = __t.object("LeaderboardEntry", {
   lobbyId: __t.u64(),
   isAi: __t.bool(),
   startingCents: __t.u64(),
+  botId: __t.u64(),
 });
 export type LeaderboardEntry = __Infer<typeof LeaderboardEntry>;
 

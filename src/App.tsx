@@ -261,6 +261,19 @@ export default function App() {
     }
   }, [gameState, gameStateReady]);
 
+  // Sent back to the menu without pressing Leave: an instructor kicked us.
+  const leavingRef = useRef(false);
+  const lastLobbyId = useRef<bigint | null>(null);
+  useEffect(() => {
+    const lobbyId = currentPlayer?.lobbyId ?? null;
+    if (lastLobbyId.current && lobbyId === 0n && !leavingRef.current) {
+      setIsPitOverlayOpen(false);
+      setBreaking({ message: 'You were removed from the room by the instructor.', key: `kick-${Date.now()}` });
+    }
+    if (lobbyId !== 0n) leavingRef.current = false;
+    lastLobbyId.current = lobbyId;
+  }, [currentPlayer?.lobbyId]);
+
   // Round end: freeze the floor and close the terminal.
   useEffect(() => {
     if (roundOver) {
@@ -391,7 +404,10 @@ export default function App() {
         isRoomOwner={isRoomOwner}
         onJoinCode={code => joinLobbyReducer({ code })}
         onPlaySolo={() => startSoloReducer()}
-        onLeave={() => leaveLobbyReducer()}
+        onLeave={() => {
+          leavingRef.current = true;
+          return leaveLobbyReducer();
+        }}
         onEndRound={() => endLobbyRoundReducer({ lobbyId: activeLobby!.lobbyId })}
         onStartRound={() => startLobbyRoundReducer({ lobbyId: activeLobby!.lobbyId })}
       />

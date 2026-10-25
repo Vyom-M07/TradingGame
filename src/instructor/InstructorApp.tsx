@@ -123,7 +123,7 @@ export default function InstructorApp() {
 
         <div className="grid gap-5 lg:grid-cols-12">
           <div className="lg:col-span-7">
-            <LeaderboardPanel rows={roomRows} />
+            <LeaderboardPanel rows={roomRows} run={run} />
           </div>
           <div className="space-y-5 lg:col-span-5">
             <AlertPanel gameState={gameState} run={run} />

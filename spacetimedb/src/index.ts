@@ -238,6 +238,11 @@ const botTrader = table(
     direction: t.string(),
     tradeCount: t.u32(),
     lobbyId: t.u64().default(0n), // room whose crew this bot belongs to
+    // Running book for the leaderboard: cents spent on fills (negative = net
+    // received) and the contracts bought, marked to market like a player's.
+    spentCents: t.i64().default(0n),
+    yesShares: t.u32().default(0),
+    noShares: t.u32().default(0),
   }
 );
 
@@ -1215,6 +1220,8 @@ function executeOrderMatch(
         makerBotId: resting.botId,
         takerBotId: botId,
       });
+      if (resting.isBot) noteBotFill(ctx, resting.botId, 'NO', resting.price, matchQty);
+      if (isBot) noteBotFill(ctx, botId, 'YES', yesExecPrice, matchQty);
 
       if (resting.quantity === matchQty) {
         ctx.db.order.orderId.delete(resting.orderId);
@@ -1278,6 +1285,8 @@ function executeOrderMatch(
         makerBotId: resting.botId,
         takerBotId: botId,
       });
+      if (resting.isBot) noteBotFill(ctx, resting.botId, 'YES', resting.price, matchQty);
+      if (isBot) noteBotFill(ctx, botId, 'NO', noExecPrice, matchQty);
 
       if (resting.quantity === matchQty) {
         ctx.db.order.orderId.delete(resting.orderId);
@@ -1651,6 +1660,19 @@ function noteBotTrade(ctx: Ctx, botId: bigint) {
   if (b) ctx.db.botTrader.botId.update({ ...b, tradeCount: b.tradeCount + 1 });
 }
 
+/** Book a fill to a bot: it bought `qty` contracts of `side` at `price` cents each. */
+function noteBotFill(ctx: Ctx, botId: bigint, side: string, price: number, qty: number) {
+  if (botId === 0n) return;
+  const b = ctx.db.botTrader.botId.find(botId);
+  if (!b) return;
+  ctx.db.botTrader.botId.update({
+    ...b,
+    spentCents: b.spentCents + BigInt(price) * BigInt(qty),
+    yesShares: b.yesShares + (side === 'YES' ? qty : 0),
+    noShares: b.noShares + (side === 'NO' ? qty : 0),
+  });
+}
+
 // Where bots stand: around the central trading post, or beside a market's booth.
 const CENTRAL_BOT_SPOTS = [
   { x: 8, y: 4, direction: 'right' },
@@ -1706,6 +1728,9 @@ function syncBots(ctx: Ctx, l: LobbyRow) {
         direction: spot.direction,
         tradeCount: 0,
         lobbyId: l.lobbyId,
+        spentCents: 0n,
+        yesShares: 0,
+        noShares: 0,
       });
     });
     // The new maker takes over the house quotes straight away.
@@ -1837,6 +1862,24 @@ export const setPlayerRole = spacetimedb.reducer(
   }
 );
 
+/**
+ * Send a student out of a class room and back to the menu (Instructor only).
+ * Like leaving: cash, positions and resting orders are kept, and the room
+ * stays in their history so rejoining can't refill their starting cash.
+ */
+export const kickPlayer = spacetimedb.reducer(
+  { target: t.identity(), lobbyId: t.u64() },
+  (ctx, { target, lobbyId }) => {
+    requireInstructor(ctx);
+    const l = requireLobby(ctx, lobbyId);
+    if (l.isSolo) throw new SenderError("Solo rooms belong to their student");
+    const p = ctx.db.player.identity.find(target);
+    if (!p || p.lobbyId !== lobbyId) throw new SenderError('That player is not in this room');
+    if (p.role === 'INSTRUCTOR') throw new SenderError('Instructors cannot be kicked');
+    ctx.db.player.identity.update({ ...p, lobbyId: 0n });
+  }
+);
+
 /** Push a breaking-news banner to every client. An empty message clears it. */
 export const broadcastAlert = spacetimedb.reducer(
   { message: t.string() },
@@ -1926,15 +1969,33 @@ const LeaderboardEntry = t.object('LeaderboardEntry', {
   lobbyId: t.u64(),
   isAi: t.bool(),
   startingCents: t.u64(), // bankroll P&L is measured from
+  botId: t.u64(), // robot trader's bot_trader row; 0 for players and the whale
 });
 
 // Server-assigned name of a player who never picked one at login.
 const PLACEHOLDER_NAME = /^Trader_[0-9a-f]{6}$/;
 
 /**
- * Traders ranked by Total Net Worth. Instructors see every room, the whale
- * included (one row per room it is on in); students see only their own room,
- * and only once its round has ended.
+ * A robot trader valued like a player. Bots trade on the house's account, so
+ * each is given a notional bankroll equal to its room's starting cash.
+ */
+function valueBot(
+  db: ReadDb,
+  b: { marketId: bigint; spentCents: bigint; yesShares: number; noShares: number },
+  startingCents: bigint
+) {
+  const mid = midPrice(db, b.marketId);
+  const holdings = BigInt(b.yesShares) * BigInt(mid) + BigInt(b.noShares) * BigInt(100 - mid);
+  let netWorth = startingCents - b.spentCents + holdings;
+  if (netWorth < 0n) netWorth = 0n;
+  const shownHoldings = holdings < netWorth ? holdings : netWorth;
+  return { cash: netWorth - shownHoldings, holdings: shownHoldings, netWorth };
+}
+
+/**
+ * Everyone trading a room, ranked by P&L: students, the whale (one row per room
+ * it is on in) and the robot traders. Instructors see every room; students see
+ * only their own room, and only once its round has ended.
  */
 export const leaderboard = spacetimedb.view(
   { name: 'leaderboard', public: true },
@@ -1964,9 +2025,10 @@ export const leaderboard = spacetimedb.view(
         netWorthCents: v.netWorth,
       };
       if (isWhale(p)) {
-        if (!isInstructor || !p.onFloor) continue;
+        if (!p.onFloor) continue;
         for (const w of ctx.db.whaleAvatar.iter()) {
-          rows.push({ ...base, lobbyId: w.lobbyId, isAi: true, startingCents: WHALE_BANKROLL });
+          if (!isInstructor && w.lobbyId !== viewer.lobbyId) continue;
+          rows.push({ ...base, lobbyId: w.lobbyId, isAi: true, startingCents: WHALE_BANKROLL, botId: 0n });
         }
         continue;
       }
@@ -1975,9 +2037,34 @@ export const leaderboard = spacetimedb.view(
       } else if (p.lobbyId !== viewer.lobbyId) {
         continue;
       }
-      rows.push({ ...base, lobbyId: p.lobbyId, isAi: false, startingCents: startingFor.get(p.lobbyId) ?? DEFAULT_BALANCE });
+      rows.push({
+        ...base,
+        lobbyId: p.lobbyId,
+        isAi: false,
+        startingCents: startingFor.get(p.lobbyId) ?? DEFAULT_BALANCE,
+        botId: 0n,
+      });
     }
-    rows.sort((a, b) => (a.netWorthCents === b.netWorthCents ? 0 : a.netWorthCents > b.netWorthCents ? -1 : 1));
+
+    for (const b of ctx.db.botTrader.iter()) {
+      if (!isInstructor && b.lobbyId !== viewer.lobbyId) continue;
+      const startingCents = startingFor.get(b.lobbyId) ?? DEFAULT_BALANCE;
+      const v = valueBot(ctx.db, b, startingCents);
+      rows.push({
+        identity: Identity.zero(), // bots have no identity; botId tells them apart
+        username: b.name,
+        cashCents: v.cash,
+        holdingsCents: v.holdings,
+        netWorthCents: v.netWorth,
+        lobbyId: b.lobbyId,
+        isAi: true,
+        startingCents,
+        botId: b.botId,
+      });
+    }
+
+    const pnl = (r: { netWorthCents: bigint; startingCents: bigint }) => r.netWorthCents - r.startingCents;
+    rows.sort((a, b) => (pnl(a) === pnl(b) ? 0 : pnl(a) > pnl(b) ? -1 : 1));
     return rows;
   }
 );

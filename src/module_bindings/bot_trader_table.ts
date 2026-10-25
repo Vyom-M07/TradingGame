@@ -20,4 +20,7 @@ export default __t.row({
   direction: __t.string(),
   tradeCount: __t.u32().name("trade_count"),
   lobbyId: __t.u64().name("lobby_id"),
+  spentCents: __t.i64().name("spent_cents"),
+  yesShares: __t.u32().name("yes_shares"),
+  noShares: __t.u32().name("no_shares"),
 });
