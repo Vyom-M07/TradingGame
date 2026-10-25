@@ -59,6 +59,7 @@ import SetInstructorPasscodeReducer from "./set_instructor_passcode_reducer";
 import SetLobbyBotsReducer from "./set_lobby_bots_reducer";
 import SetPlayerRoleReducer from "./set_player_role_reducer";
 import SetUsernameReducer from "./set_username_reducer";
+import SetWhaleModelReducer from "./set_whale_model_reducer";
 import StartLobbyRoundReducer from "./start_lobby_round_reducer";
 import StartSoloReducer from "./start_solo_reducer";
 import WhaleMoveReducer from "./whale_move_reducer";
@@ -282,6 +283,7 @@ const reducersSchema = __reducers(
   __reducerSchema("set_lobby_bots", SetLobbyBotsReducer),
   __reducerSchema("set_player_role", SetPlayerRoleReducer),
   __reducerSchema("set_username", SetUsernameReducer),
+  __reducerSchema("set_whale_model", SetWhaleModelReducer),
   __reducerSchema("start_lobby_round", StartLobbyRoundReducer),
   __reducerSchema("start_solo", StartSoloReducer),
   __reducerSchema("whale_move", WhaleMoveReducer),

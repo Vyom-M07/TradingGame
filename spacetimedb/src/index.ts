@@ -138,6 +138,8 @@ const lobby = table(
     whaleEnabled: t.bool().default(false),
     botTickMs: t.u32().default(1000),
     roundOver: t.bool().default(false),
+    // Which model drives the whale in this room: "claude" | "gemini".
+    whaleModel: t.string().default('claude'),
   }
 );
 
@@ -370,6 +372,13 @@ function requireRoomController(ctx: Ctx, l: LobbyRow) {
   } else {
     requireInstructor(ctx);
   }
+}
+
+/** A solo room's own market is settled by the room's owner; class floor markets by an instructor. */
+function requireMarketController(ctx: Ctx, m: MarketRow) {
+  const solo = m.lobbyId === 0n ? null : ctx.db.lobby.lobbyId.find(m.lobbyId);
+  if (solo?.isSolo && solo.instructor.equals(ctx.sender)) return;
+  requireInstructor(ctx);
 }
 
 /** A room trades its central market, plus the class floor pits in class rooms. */
@@ -633,6 +642,7 @@ export const init = spacetimedb.init(ctx => {
     whaleEnabled: false,
     botTickMs: 1000,
     roundOver: false,
+    whaleModel: 'claude',
   });
 
   // 2. High-interest prediction markets
@@ -934,6 +944,7 @@ export const createLobby = spacetimedb.reducer(
       whaleEnabled: false,
       botTickMs: 1000,
       roundOver: false,
+      whaleModel: 'claude',
     });
 
     let p = getOrCreatePlayer(ctx);
@@ -1023,6 +1034,7 @@ export const startSolo = spacetimedb.reducer(ctx => {
       whaleEnabled: false,
       botTickMs: 1000,
       roundOver: false,
+      whaleModel: 'claude',
     });
   }
   if (!ctx.db.market.marketId.find(l.marketId)) {
@@ -1420,7 +1432,6 @@ export const resolveMarket = spacetimedb.reducer(
     outcome: t.string(), // "YES" or "NO"
   },
   (ctx, { marketId, outcome }) => {
-    requireInstructor(ctx);
     const norm = outcome.toUpperCase();
     if (norm !== 'YES' && norm !== 'NO') {
       throw new SenderError("Winning side must be 'YES' or 'NO'");
@@ -1428,6 +1439,7 @@ export const resolveMarket = spacetimedb.reducer(
 
     const m = ctx.db.market.marketId.find(marketId);
     if (!m) throw new SenderError('Market not found');
+    requireMarketController(ctx, m);
     if (m.status === 'RESOLVED') throw new SenderError('Market is already resolved');
 
     // Store pre-resolution price for accurate undo
@@ -1540,9 +1552,9 @@ export const resetMarket = spacetimedb.reducer(
     defaultPrice: t.u32(),
   },
   (ctx, { marketId, defaultPrice }) => {
-    requireInstructor(ctx);
     const m = ctx.db.market.marketId.find(marketId);
     if (!m) throw new SenderError('Market not found');
+    requireMarketController(ctx, m);
 
     // Restore preResolvedPrice if valid, otherwise fallback to defaultPrice or 50
     const restoredPrice = (m.preResolvedPrice >= 1 && m.preResolvedPrice <= 99)
@@ -1803,6 +1815,19 @@ export const setLobbyBots = spacetimedb.reducer(
   }
 );
 
+const WHALE_MODELS = ['claude', 'gemini'];
+
+/** Pick the model that drives the whale in a room; the sidecar reads it each tick. */
+export const setWhaleModel = spacetimedb.reducer(
+  { lobbyId: t.u64(), model: t.string() },
+  (ctx, { lobbyId, model }) => {
+    const l = requireLobby(ctx, lobbyId);
+    requireRoomController(ctx, l);
+    if (!WHALE_MODELS.includes(model)) throw new SenderError("Whale model must be 'claude' or 'gemini'");
+    ctx.db.lobby.lobbyId.update({ ...l, whaleModel: model });
+  }
+);
+
 /** The whale sidecar walks its avatar around a room it is switched on in. */
 export const whaleMove = spacetimedb.reducer(
   { lobbyId: t.u64(), x: t.i32(), y: t.i32(), direction: t.string() },
@@ -2028,7 +2053,15 @@ export const leaderboard = spacetimedb.view(
         if (!p.onFloor) continue;
         for (const w of ctx.db.whaleAvatar.iter()) {
           if (!isInstructor && w.lobbyId !== viewer.lobbyId) continue;
-          rows.push({ ...base, lobbyId: w.lobbyId, isAi: true, startingCents: WHALE_BANKROLL, botId: 0n });
+          const model = ctx.db.lobby.lobbyId.find(w.lobbyId)?.whaleModel === 'gemini' ? 'Gemini' : 'Claude';
+          rows.push({
+            ...base,
+            username: `${p.username} (${model})`,
+            lobbyId: w.lobbyId,
+            isAi: true,
+            startingCents: WHALE_BANKROLL,
+            botId: 0n,
+          });
         }
         continue;
       }

@@ -23,4 +23,5 @@ export default __t.row({
   whaleEnabled: __t.bool().name("whale_enabled"),
   botTickMs: __t.u32().name("bot_tick_ms"),
   roundOver: __t.bool().name("round_over"),
+  whaleModel: __t.string().name("whale_model"),
 });

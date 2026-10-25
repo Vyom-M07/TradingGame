@@ -44,6 +44,9 @@ export default function App() {
   const startSoloReducer = useReducer(reducers.startSolo);
   const leaveLobbyReducer = useReducer(reducers.leaveLobby);
   const setLobbyBotsReducer = useReducer(reducers.setLobbyBots);
+  const setWhaleModelReducer = useReducer(reducers.setWhaleModel);
+  const resolveMarketReducer = useReducer(reducers.resolveMarket);
+  const resetMarketReducer = useReducer(reducers.resetMarket);
   const endLobbyRoundReducer = useReducer(reducers.endLobbyRound);
   const startLobbyRoundReducer = useReducer(reducers.startLobbyRound);
 
@@ -423,6 +426,11 @@ export default function App() {
         }}
         onEndRound={() => endLobbyRoundReducer({ lobbyId: activeLobby!.lobbyId })}
         onStartRound={() => startLobbyRoundReducer({ lobbyId: activeLobby!.lobbyId })}
+        market={activeMarket}
+        onResolve={outcome => resolveMarketReducer({ marketId: activeMarket!.marketId, outcome })}
+        onReopen={() =>
+          resetMarketReducer({ marketId: activeMarket!.marketId, defaultPrice: activeMarket!.preResolvedPrice || 50 })
+        }
       />
 
       <HelpDialog isOpen={isHelpOpen} onClose={() => setIsHelpOpen(false)} />
@@ -442,6 +450,7 @@ export default function App() {
         onSetBots={(botsEnabled, whaleEnabled, tickMs) =>
           setLobbyBotsReducer({ lobbyId: activeLobby!.lobbyId, botsEnabled, whaleEnabled, tickMs })
         }
+        onSetWhaleModel={model => setWhaleModelReducer({ lobbyId: activeLobby!.lobbyId, model })}
       />
 
       {roundOver && (

@@ -4,6 +4,7 @@ import { useReducer } from 'spacetimedb/react';
 import { reducers } from '../module_bindings';
 import type { Clue, GameState, LeaderboardEntry, Lobby, Market, Order, Player } from '../module_bindings/types';
 import { formatCents, leaderboardKey, pnlOf } from '../components/RoundOverlays';
+import { WHALE_MODEL_LABELS } from '../components/SettingsDialog';
 
 /** Runs a reducer call and reports the outcome in the dashboard toast. */
 export type Run = (label: string, call: () => Promise<unknown>) => Promise<boolean>;
@@ -836,6 +837,7 @@ function BotControls({
   run: Run;
   setLobbyBots: (args: { lobbyId: bigint; botsEnabled: boolean; whaleEnabled: boolean; tickMs: number }) => Promise<unknown>;
 }) {
+  const setWhaleModel = useReducer(reducers.setWhaleModel);
   const amm = lobby.botsEnabled;
   const whaleOn = lobby.whaleEnabled;
   const tickMs = lobby.botTickMs;
@@ -880,6 +882,23 @@ function BotControls({
         >
           WHALE {whaleOn ? 'ON' : 'OFF'}
         </button>
+        {whaleOn && (
+          <select
+            className="panel-inset px-1.5 py-1 text-[8px] outline-none"
+            title="Model driving the whale in this room"
+            value={lobby.whaleModel}
+            onChange={e => {
+              const model = e.target.value;
+              void run(`Whale now runs on ${WHALE_MODEL_LABELS[model]}`, () => setWhaleModel({ lobbyId: lobby.lobbyId, model }));
+            }}
+          >
+            {Object.entries(WHALE_MODEL_LABELS).map(([value, label]) => (
+              <option key={value} value={value}>
+                {label}
+              </option>
+            ))}
+          </select>
+        )}
         <span className="ml-auto flex gap-1">
           {BOT_SPEEDS.map(ms => (
             <button

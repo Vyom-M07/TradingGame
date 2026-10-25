@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
-import { Lobby } from '../module_bindings/types';
+import { Lobby, Market } from '../module_bindings/types';
 import { PixelDialog } from './Dialogs';
 
 interface LobbyModalProps {
@@ -14,6 +14,10 @@ interface LobbyModalProps {
   onLeave: () => Promise<unknown>;
   onEndRound: () => Promise<unknown>;
   onStartRound: () => Promise<unknown>;
+  /** The room's central market; solo owners settle it themselves. */
+  market: Market | null;
+  onResolve: (outcome: 'YES' | 'NO') => Promise<unknown>;
+  onReopen: () => Promise<unknown>;
 }
 
 const inputCls = 'panel-inset w-full px-3 py-2.5 text-[10px] outline-none focus:bg-white';
@@ -29,8 +33,13 @@ export function LobbyModal({
   onLeave,
   onEndRound,
   onStartRound,
+  market,
+  onResolve,
+  onReopen,
 }: LobbyModalProps) {
   const [copied, setCopied] = useState(false);
+  // Resolving pays out and can't be undone without a reopen: ask for a second click.
+  const [armedOutcome, setArmedOutcome] = useState<'YES' | 'NO' | null>(null);
   const [code, setCode] = useState('');
   const [busy, setBusy] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
@@ -94,6 +103,40 @@ export function LobbyModal({
           >
             {activeLobby.roundOver ? 'Start new round' : 'End round & see results'}
           </button>
+        )}
+
+        {isRoomOwner && market && (
+          <div className="panel-inset space-y-2 p-3">
+            <div className="text-slate-500">RESOLVE MARKET</div>
+            <div className="leading-relaxed">{market.question}</div>
+            {market.status === 'RESOLVED' ? (
+              <div className="flex items-center justify-between gap-3">
+                <span className={market.winningSide === 'YES' ? 'text-emerald-700' : 'text-rose-600'}>
+                  {market.winningSide} WON
+                </span>
+                <button className="sign !bg-amber-200 text-[9px] disabled:opacity-50" disabled={busy} onClick={() => void act(onReopen, false)}>
+                  Reopen
+                </button>
+              </div>
+            ) : (
+              <div className="grid grid-cols-2 gap-2">
+                {(['YES', 'NO'] as const).map(outcome => (
+                  <button
+                    key={outcome}
+                    className={`sign text-[9px] disabled:opacity-50 ${outcome === 'YES' ? '!bg-emerald-300' : '!bg-rose-300'}`}
+                    disabled={busy}
+                    onClick={() => {
+                      if (armedOutcome !== outcome) return setArmedOutcome(outcome);
+                      setArmedOutcome(null);
+                      void act(() => onResolve(outcome), false);
+                    }}
+                  >
+                    {armedOutcome === outcome ? `Confirm ${outcome}?` : `${outcome} wins`}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
         )}
 
         <form

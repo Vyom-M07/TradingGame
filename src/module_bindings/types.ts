@@ -108,6 +108,7 @@ export const Lobby = __t.object("Lobby", {
   whaleEnabled: __t.bool(),
   botTickMs: __t.u32(),
   roundOver: __t.bool(),
+  whaleModel: __t.string(),
 });
 export type Lobby = __Infer<typeof Lobby>;
 

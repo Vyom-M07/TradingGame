@@ -26,6 +26,7 @@ import { fileURLToPath } from 'node:url';
 import { parseEnv } from 'node:util';
 import Anthropic from '@anthropic-ai/sdk';
 import { zodOutputFormat } from '@anthropic-ai/sdk/helpers/zod';
+import { GoogleGenAI, ThinkingLevel } from '@google/genai';
 import { z } from 'zod/v4';
 import type { Identity } from 'spacetimedb';
 import { DbConnection, tables } from '../src/module_bindings/index.ts';
@@ -44,18 +45,30 @@ const readEnv = (file: string) => {
 for (const file of ENV_FILES.slice(0, 2)) {
   for (const [key, value] of Object.entries(readEnv(file))) process.env[key] ??= value;
 }
-// The API key may live in any of the env files.
+// The API keys may live in any of the env files.
 for (const file of ENV_FILES) {
-  const key = readEnv(file).ANTHROPIC_API_KEY;
-  if (key && !process.env.ANTHROPIC_API_KEY) process.env.ANTHROPIC_API_KEY = key;
+  for (const name of ['ANTHROPIC_API_KEY', 'GEMINI_API_KEY']) {
+    const key = readEnv(file)[name];
+    if (key && !process.env[name]) process.env[name] = key;
+  }
 }
 
 const HOST = process.env.VITE_SPACETIMEDB_URI || 'ws://localhost:3000';
 const DB_NAME = process.env.VITE_SPACETIMEDB_NAME || 'serious-trading-local';
 const NAME = process.env.WHALE_NAME || 'Whale AI';
 const PASSCODE = process.env.WHALE_PASSCODE || 'CALHACKS13';
-const MODEL = 'claude-haiku-5-5';
+// Each room picks its whale's model (lobby.whaleModel) in the instructor console or the solo [BOTS] dialog.
+const CLAUDE_MODEL = 'claude-haiku-5-5';
+// Best first. A model that fails (overloaded, timed out, any error) is benched
+// and the next one down takes over; when its bench time is up it gets first
+// pick again, so the whale climbs back to 3.8 as soon as it recovers.
+const GEMINI_LADDER = ['gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3.6-flash', 'gemini-3.5-flash'];
+const BENCH_BASE_MS = 60_000; // doubles on each failure in a row...
+const BENCH_MAX_MS = 5 * 60_000; // ...up to 5 minutes
 const TICK_MS = 10_000;
+// A model call slower than this is abandoned and the EV sniper trades that tick
+// (Gemini in particular can stall for minutes under load).
+const MODEL_TIMEOUT_MS = 20_000;
 const STEP_MS = 260; // one floor tile per step while walking
 const MAX_ORDER_QTY = 400;
 const MAX_ORDER_CENTS = 150_000n; // never commit more than $1,500 on a single order
@@ -67,6 +80,7 @@ const GRID = { cols: 20, rows: 11 };
 const CENTRAL_PIT = { minX: 8, maxX: 11, minY: 4, maxY: 7 };
 
 const anthropic = process.env.ANTHROPIC_API_KEY ? new Anthropic() : null;
+const gemini = process.env.GEMINI_API_KEY ? new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY }) : null;
 
 // --- Decision types ------------------------------------------------------------
 
@@ -140,7 +154,10 @@ async function register() {
   try {
     await conn.reducers.registerWhale({ name: NAME, passcode: PASSCODE });
     registered = true;
-    log(`${NAME} is on the floor. Engine: ${anthropic ? `Claude (${MODEL})` : 'EV sniper (no ANTHROPIC_API_KEY)'}`);
+    log(
+      `${NAME} is on the floor. Claude: ${anthropic ? CLAUDE_MODEL : 'off (no ANTHROPIC_API_KEY)'} · ` +
+        `Gemini: ${gemini ? GEMINI_LADDER.join(' > ') : 'off (no GEMINI_API_KEY)'} · each room picks its model`
+    );
   } catch (err) {
     log('registerWhale failed:', errorText(err));
     log('check WHALE_PASSCODE matches the instructor passcode, and that the name is free.');
@@ -149,7 +166,13 @@ async function register() {
 
 // --- Main loop ---------------------------------------------------------------------
 
-setInterval(() => void tick(), TICK_MS);
+// Ticks never overlap: a slow tick makes the next one skip rather than pile up.
+let ticking = false;
+setInterval(() => {
+  if (ticking) return;
+  ticking = true;
+  void tick().finally(() => (ticking = false));
+}, TICK_MS);
 
 async function tick() {
   if (!registered || !me || !conn.isActive) return;
@@ -166,21 +189,63 @@ async function tick() {
   cancelStaleOrders(snap);
   void walkTo(room, pitTileFor(market));
 
-  let decision: Decision;
-  let engine = 'EV';
-  if (anthropic) {
-    try {
-      decision = await askClaude(snap);
-      engine = 'Claude';
-    } catch (err) {
-      log('Claude call failed, using EV sniper this tick:', errorText(err));
-      decision = evSniper(snap);
-    }
-  } else {
-    decision = evSniper(snap);
-  }
-
+  const { decision, engine } = await decide(snap);
   await execute(snap, decision, engine);
+}
+
+/** Ask the model this room picked; fall back to the EV sniper if it's unavailable or errors. */
+async function decide(s: Snapshot): Promise<{ decision: Decision; engine: string }> {
+  if (s.room.whaleModel === 'gemini') return decideWithGemini(s);
+  if (!anthropic) return { decision: evSniper(s), engine: 'EV (no ANTHROPIC_API_KEY)' };
+  try {
+    return { decision: await askClaude(s), engine: 'Claude' };
+  } catch (err) {
+    log('Claude call failed, using EV sniper this tick:', errorText(err));
+    return { decision: evSniper(s), engine: 'EV' };
+  }
+}
+
+// Gemini models currently benched: model -> when it may be tried again, and its failures in a row.
+const benchedUntil = new Map<string, number>();
+const failStreak = new Map<string, number>();
+let lastGemini: string | null = null;
+
+/** One call per tick to the best Gemini model that isn't benched; a failure benches it and trades EV. */
+async function decideWithGemini(s: Snapshot): Promise<{ decision: Decision; engine: string }> {
+  if (!gemini) return { decision: evSniper(s), engine: 'EV (no GEMINI_API_KEY)' };
+  const now = Date.now();
+  const model = GEMINI_LADDER.find(m => (benchedUntil.get(m) ?? 0) <= now);
+  if (!model) return { decision: evSniper(s), engine: 'EV (all Gemini models benched)' };
+  if (model !== lastGemini) log(`Gemini engine: ${model}${lastGemini ? ` (was ${lastGemini})` : ''}`);
+  lastGemini = model;
+
+  const label = model.replace('gemini-', 'Gemini ');
+  try {
+    const decision = await askGemini(s, model);
+    failStreak.delete(model);
+    return { decision, engine: label };
+  } catch (err) {
+    const streak = (failStreak.get(model) ?? 0) + 1;
+    failStreak.set(model, streak);
+    const benchMs = Math.min(BENCH_BASE_MS * 2 ** (streak - 1), BENCH_MAX_MS);
+    const failedAt = Date.now(); // a timeout can take a while; other benches may have expired since
+    benchedUntil.set(model, failedAt + benchMs);
+    const next = GEMINI_LADDER.find(m => m !== model && (benchedUntil.get(m) ?? 0) <= failedAt);
+    log(
+      `${label} failed (${geminiFailure(err)}); benched ${benchMs / 1000}s, EV this tick, ` +
+        `next tick ${next ?? 'EV only until a model comes back'}`
+    );
+    return { decision: evSniper(s), engine: 'EV' };
+  }
+}
+
+/** Short reason for the log: overloaded, timed out, or the API's message. */
+function geminiFailure(err: unknown) {
+  const status = (err as { status?: number })?.status;
+  if (status === 503 || status === 429) return `high demand, HTTP ${status}`;
+  if (err instanceof Error && err.name === 'AbortError') return `no answer in ${MODEL_TIMEOUT_MS / 1000}s`;
+  if (err instanceof Error && /aborted/i.test(err.message)) return `no answer in ${MODEL_TIMEOUT_MS / 1000}s`;
+  return errorText(err).slice(0, 120);
 }
 
 /** Rooms the whale is switched on in (and standing in) whose round is still open. */
@@ -258,8 +323,9 @@ Order semantics:
 Size up when the clues make the outcome near-certain, keep inventory balanced when they don't, and
 write reasoning as one or two short sentences a student could learn from.`;
 
-async function askClaude(s: Snapshot): Promise<Decision> {
-  const state = {
+/** What either model sees each tick: one market, its book, the clues and our inventory. */
+function marketState(s: Snapshot) {
+  return {
     question: s.market.question,
     description: s.market.description,
     category: s.market.category,
@@ -284,18 +350,41 @@ async function askClaude(s: Snapshot): Promise<Decision> {
       restingOrders: s.myOrders.map(o => ({ side: o.side, price: o.price, quantity: o.quantity })),
     },
   };
+}
 
-  const response = await anthropic!.messages.parse({
-    model: MODEL,
-    max_tokens: 4000,
-    output_config: { effort: 'low', format: zodOutputFormat(Decision) },
-    system: SYSTEM_PROMPT,
-    messages: [{ role: 'user', content: JSON.stringify(state) }],
-  });
+async function askClaude(s: Snapshot): Promise<Decision> {
+  const response = await anthropic!.messages.parse(
+    {
+      model: CLAUDE_MODEL,
+      max_tokens: 4000,
+      output_config: { effort: 'low', format: zodOutputFormat(Decision) },
+      system: SYSTEM_PROMPT,
+      messages: [{ role: 'user', content: JSON.stringify(marketState(s)) }],
+    },
+    { timeout: MODEL_TIMEOUT_MS, maxRetries: 0 }
+  );
   if (response.stop_reason === 'refusal' || !response.parsed_output) {
     throw new Error(`no decision (stop_reason=${response.stop_reason})`);
   }
   return response.parsed_output;
+}
+
+const DECISION_JSON_SCHEMA = z.toJSONSchema(Decision);
+
+async function askGemini(s: Snapshot, model: string): Promise<Decision> {
+  const response = await gemini!.models.generateContent({
+    model,
+    contents: JSON.stringify(marketState(s)),
+    config: {
+      systemInstruction: SYSTEM_PROMPT,
+      responseMimeType: 'application/json',
+      responseJsonSchema: DECISION_JSON_SCHEMA,
+      thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+      abortSignal: AbortSignal.timeout(MODEL_TIMEOUT_MS),
+    },
+  });
+  if (!response.text) throw new Error(`no decision (finishReason=${response.candidates?.[0]?.finishReason})`);
+  return Decision.parse(JSON.parse(response.text));
 }
 
 /**

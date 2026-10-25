@@ -31,6 +31,7 @@ import SetInstructorPasscodeReducer from "../set_instructor_passcode_reducer";
 import SetLobbyBotsReducer from "../set_lobby_bots_reducer";
 import SetPlayerRoleReducer from "../set_player_role_reducer";
 import SetUsernameReducer from "../set_username_reducer";
+import SetWhaleModelReducer from "../set_whale_model_reducer";
 import StartLobbyRoundReducer from "../start_lobby_round_reducer";
 import StartSoloReducer from "../start_solo_reducer";
 import WhaleMoveReducer from "../whale_move_reducer";
@@ -60,6 +61,7 @@ export type SetInstructorPasscodeParams = __Infer<typeof SetInstructorPasscodeRe
 export type SetLobbyBotsParams = __Infer<typeof SetLobbyBotsReducer>;
 export type SetPlayerRoleParams = __Infer<typeof SetPlayerRoleReducer>;
 export type SetUsernameParams = __Infer<typeof SetUsernameReducer>;
+export type SetWhaleModelParams = __Infer<typeof SetWhaleModelReducer>;
 export type StartLobbyRoundParams = __Infer<typeof StartLobbyRoundReducer>;
 export type StartSoloParams = __Infer<typeof StartSoloReducer>;
 export type WhaleMoveParams = __Infer<typeof WhaleMoveReducer>;
