@@ -611,6 +611,17 @@ export const onConnect = spacetimedb.clientConnected(ctx => {
   }
   // Back within the grace period: keep the avatar where it was.
   cancelDisconnectTimers(ctx, ctx.sender);
+
+  // Bots switched on but no tick scheduled (e.g. after a republish): restart them.
+  const cfg = ctx.db.botConfig.id.find(0);
+  if (cfg?.ammEnabled && ctx.db.botTimer.count() === 0n) {
+    applyBotConfig(ctx, {
+      ammEnabled: true,
+      whaleEnabled: cfg.whaleEnabled,
+      tickMs: BOT_TICK_OPTIONS.includes(cfg.tickMs) ? cfg.tickMs : 1000,
+      controlledBy: cfg.controlledBy,
+    });
+  }
 });
 
 export const onDisconnect = spacetimedb.clientDisconnected(ctx => {
@@ -1664,7 +1675,27 @@ export const registerWhale = spacetimedb.reducer(
     const cfg = ctx.db.instructorConfig.id.find(0);
     const expected = cfg?.passcode ?? DEFAULT_INSTRUCTOR_PASSCODE;
     if (passcode.trim() !== expected) throw new SenderError('Incorrect passcode');
-    const trimmed = assertUniqueName(ctx, name);
+    const trimmed = name.trim();
+    if (trimmed.length < 2 || trimmed.length > 24) {
+      throw new SenderError('Name must be between 2 and 24 characters');
+    }
+    const lower = trimmed.toLowerCase();
+
+    // Reclaim name from any prior whale instance if the identity changed across runs
+    for (const other of ctx.db.player.iter()) {
+      if (!other.identity.equals(ctx.sender) && other.username.toLowerCase() === lower) {
+        if (other.avatarType === 'whale') {
+          ctx.db.player.identity.update({
+            ...other,
+            username: `Whale_Old_${other.identity.toHexString().slice(0, 6)}`,
+            onFloor: false,
+          });
+        } else {
+          throw new SenderError(`The name "${trimmed}" is already taken`);
+        }
+      }
+    }
+
     const p = getOrCreatePlayer(ctx);
     cancelDisconnectTimers(ctx, ctx.sender);
     ctx.db.player.identity.update({
