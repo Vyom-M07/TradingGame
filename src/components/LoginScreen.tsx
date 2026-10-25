@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { Player } from '../module_bindings/types';
-import { AVATARS, AVATAR_TYPES, avatarTypeFor, type AvatarType } from '../game/assets';
+import { AVATARS, SELECTABLE_AVATARS, avatarTypeFor, type AvatarType } from '../game/assets';
 
 interface LoginScreenProps {
   connected: boolean;
@@ -25,7 +25,8 @@ export function LoginScreen({ connected, ready, players, me, onJoin }: LoginScre
   useEffect(() => {
     if (prefilled || !me) return;
     if (!isPlaceholderName(me.username)) setName(me.username);
-    setAvatar(avatarTypeFor(me.avatarType));
+    const previous = avatarTypeFor(me.avatarType);
+    setAvatar(AVATARS[previous].selectable ? previous : 'trader');
     setPrefilled(true);
   }, [me, prefilled]);
 
@@ -68,7 +69,7 @@ export function LoginScreen({ connected, ready, players, me, onJoin }: LoginScre
           <div>
             <div className="mb-3 text-slate-500">CHOOSE YOUR TRADER</div>
             <div className="grid grid-cols-2 gap-3" role="radiogroup">
-              {AVATAR_TYPES.map(type => (
+              {SELECTABLE_AVATARS.map(type => (
                 <AvatarCard key={type} type={type} selected={avatar === type} onSelect={() => setAvatar(type)} />
               ))}
             </div>

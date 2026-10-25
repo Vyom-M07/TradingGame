@@ -12,6 +12,8 @@ import { SettingsDialog } from './components/SettingsDialog';
 import { BreakingBanner, LeaderboardReveal } from './components/RoundOverlays';
 import { LoginScreen } from './components/LoginScreen';
 
+const botKey = (botId: bigint) => `bot-${botId}`;
+
 export default function App() {
   const { isActive: connected, identity: myIdentity } = useSpacetimeDB();
 
@@ -37,7 +39,6 @@ export default function App() {
   const setUsernameReducer = useReducer(reducers.setUsername);
   const joinGameReducer = useReducer(reducers.joinGame);
   const setSoloBotsReducer = useReducer(reducers.setSoloBots);
-  const botTickReducer = useReducer(reducers.optimalBotTick);
 
   // Login gate: Phaser only mounts after join_game succeeds this session.
   const [joined, setJoined] = useState(false);
@@ -126,10 +127,7 @@ export default function App() {
     () => (myHex ? players.find(p => p.identity.toHexString() === myHex) ?? null : null),
     [players, myHex]
   );
-  const whalePlayer = useMemo(
-    () => players.find(p => p.avatarType === 'whale' || p.username.toLowerCase().includes('whale')) ?? null,
-    [players]
-  );
+  const whalePlayer = useMemo(() => players.find(p => p.avatarType === 'whale') ?? null, [players]);
   const isInstructor = currentPlayer?.role === 'INSTRUCTOR';
   // Back to the login screen if the server took us off the floor (2 min disconnect).
   const needsLogin = !joined || currentPlayer?.onFloor === false;
@@ -151,10 +149,34 @@ export default function App() {
           x: p.x,
           y: p.y,
           direction: p.direction,
-          kind: agentKindFor(p.username),
+          kind: agentKindFor(p.username, p.avatarType),
           avatarType: avatarTypeFor(p.avatarType),
-        })),
-    [players, myHex]
+        }))
+        // Robot traders the server spawns while the bots are on.
+        .concat(
+          botTraders.map(b => ({
+            identityHex: botKey(b.botId),
+            username: b.name,
+            cashBalance: 0,
+            x: b.x,
+            y: b.y,
+            direction: b.direction,
+            kind: 'bot' as const,
+            avatarType: 'robot' as const,
+          }))
+        ),
+    [players, botTraders, myHex]
+  );
+
+  // Who is behind a trade, for the tape.
+  const traderName = useCallback(
+    (identity: { toHexString(): string }, botId: bigint) => {
+      if (botId > 0n) return botTraders.find(b => b.botId === botId)?.name ?? 'Bot';
+      const hex = identity.toHexString();
+      if (hex === myHex) return 'You';
+      return players.find(p => p.identity.toHexString() === hex)?.username ?? 'House';
+    },
+    [botTraders, players, myHex]
   );
 
   // Markets the instructor deployed onto the floor get their own pit.
@@ -188,9 +210,11 @@ export default function App() {
       if (!scene) continue;
       const takerPrice = t.takerSide === 'YES' ? t.price : 100 - t.price;
       const makerPrice = t.makerSide === 'YES' ? t.price : 100 - t.price;
-      scene.say(t.taker.toHexString(), `${t.quantity} ${t.takerSide} @ ${takerPrice}¢!`, t.takerSide === 'YES' ? '#15803d' : '#be123c');
-      if (t.maker.toHexString() !== t.taker.toHexString()) {
-        scene.say(t.maker.toHexString(), `Filled ${t.makerSide} @ ${makerPrice}¢`, '#1d1b2a');
+      const takerKey = t.takerBotId > 0n ? botKey(t.takerBotId) : t.taker.toHexString();
+      const makerKey = t.makerBotId > 0n ? botKey(t.makerBotId) : t.maker.toHexString();
+      scene.say(takerKey, `${t.takerSide === 'YES' ? 'BUY' : 'SELL'} ${t.quantity} @ ${takerPrice}¢!`, t.takerSide === 'YES' ? '#15803d' : '#be123c');
+      if (makerKey !== takerKey) {
+        scene.say(makerKey, `Filled ${t.makerSide} @ ${makerPrice}¢`, '#1d1b2a');
       }
       if (activeMarket && t.marketId === activeMarket.marketId) scene.triggerTradeExecutionEffect(t.price, t.quantity);
     }
@@ -237,17 +261,6 @@ export default function App() {
       setResultsHidden(false);
     }
   }, [roundOver]);
-
-  // Solo bot loop: ticks the active pit when enabled by the player and not controlled by instructor
-  useEffect(() => {
-    if (!botConfig?.ammEnabled || botConfig.controlledBy === 'INSTRUCTOR' || !connected) return;
-    const timer = setInterval(() => {
-      if (focusMarket && focusMarket.status === 'OPEN') {
-        void botTickReducer({ marketId: focusMarket.marketId }).catch(() => undefined);
-      }
-    }, botConfig.tickMs || 1000);
-    return () => clearInterval(timer);
-  }, [botConfig?.ammEnabled, botConfig?.controlledBy, botConfig?.tickMs, connected, focusMarket, botTickReducer]);
 
   const handlePlayerMove = useCallback(
     (x: number, y: number, direction: string) => {
@@ -350,6 +363,7 @@ export default function App() {
         player={currentPlayer}
         positions={positions}
         myIdentity={myIdentity ?? null}
+        traderName={traderName}
         onPlaceOrder={handlePlaceOrder}
         onCancelOrder={handleCancelOrder}
       />

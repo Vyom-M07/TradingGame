@@ -25,6 +25,12 @@ export const BotConfig = __t.object("BotConfig", {
 });
 export type BotConfig = __Infer<typeof BotConfig>;
 
+export const BotTimer = __t.object("BotTimer", {
+  scheduledId: __t.u64(),
+  scheduledAt: __t.scheduleAt(),
+});
+export type BotTimer = __Infer<typeof BotTimer>;
+
 export const BotTrader = __t.object("BotTrader", {
   botId: __t.u64(),
   name: __t.string(),
@@ -128,6 +134,7 @@ export const Order = __t.object("Order", {
   isBot: __t.bool(),
   botRole: __t.string(),
   timestamp: __t.timestamp(),
+  botId: __t.u64(),
 });
 export type Order = __Infer<typeof Order>;
 
@@ -166,6 +173,8 @@ export const Trade = __t.object("Trade", {
   price: __t.u32(),
   quantity: __t.u32(),
   timestamp: __t.timestamp(),
+  makerBotId: __t.u64(),
+  takerBotId: __t.u64(),
 });
 export type Trade = __Infer<typeof Trade>;
 

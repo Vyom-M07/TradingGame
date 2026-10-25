@@ -11,6 +11,7 @@ interface TradingPitOverlayProps {
   player: Player | null;
   positions: readonly Position[];
   myIdentity: Identity | null;
+  traderName: (identity: Identity, botId: bigint) => string;
   onPlaceOrder: (side: 'YES' | 'NO', price: number, quantity: number) => Promise<void> | void;
   onCancelOrder: (orderId: bigint) => void;
 }
@@ -18,6 +19,7 @@ interface TradingPitOverlayProps {
 interface Level {
   price: number;
   volume: number;
+  botVolume: number;
   myQuantity: number;
   orderIds: bigint[];
 }
@@ -31,6 +33,7 @@ export function TradingPitOverlay({
   player,
   positions,
   myIdentity,
+  traderName,
   onPlaceOrder,
   onCancelOrder,
 }: TradingPitOverlayProps) {
@@ -87,8 +90,9 @@ export function TradingPitOverlay({
       if (!isYes && o.side !== 'NO') continue;
       const map = isYes ? bidsMap : asksMap;
       const levelPrice = isYes ? o.price : 100 - o.price;
-      const entry = map.get(levelPrice) || { price: levelPrice, volume: 0, myQuantity: 0, orderIds: [] };
+      const entry = map.get(levelPrice) || { price: levelPrice, volume: 0, botVolume: 0, myQuantity: 0, orderIds: [] };
       entry.volume += o.quantity;
+      if (o.isBot) entry.botVolume += o.quantity;
       if (isMine) {
         entry.myQuantity += o.quantity;
         entry.orderIds.push(o.orderId);
@@ -174,6 +178,11 @@ export function TradingPitOverlay({
         <div className={`z-10 col-span-3 ${isAsk ? 'text-rose-400' : 'text-emerald-400'}`}>{level.price}¢</div>
         <div className="z-10 col-span-3 text-right text-slate-200">{level.volume}</div>
         <div className="z-10 col-span-6 flex items-center justify-end gap-2">
+          {level.botVolume > 0 && level.myQuantity === 0 && (
+            <span className="text-[7px] text-sky-400" title="Quoted by a market-maker bot">
+              BOT{level.botVolume === level.volume ? '' : ` ${level.botVolume}`}
+            </span>
+          )}
           {level.myQuantity > 0 && (
             <span className="font-['Press_Start_2P'] text-[8px] text-yellow-400 animate-pulse">
               YOU: {level.myQuantity}
@@ -255,7 +264,7 @@ export function TradingPitOverlay({
               <div className="grid grid-cols-12 px-2 py-1 text-[7px] text-slate-500">
                 <div className="col-span-3">PRICE</div>
                 <div className="col-span-3 text-right">VOLUME</div>
-                <div className="col-span-6 text-right">YOURS</div>
+                <div className="col-span-6 text-right">WHO</div>
               </div>
 
               <div className="flex max-h-[180px] flex-col-reverse overflow-y-auto">
@@ -430,7 +439,11 @@ export function TradingPitOverlay({
               .slice(0, 6)
               .map(t => (
                 <span key={t.tradeId.toString()} className="whitespace-nowrap">
-                  <span className="text-white">{t.quantity}x</span> @ <span className="text-emerald-400">{t.price}¢</span>
+                  <span className={t.takerBotId > 0n ? 'text-sky-400' : 'text-yellow-300'}>{traderName(t.taker, t.takerBotId)}</span>{' '}
+                  <span className={t.takerSide === 'YES' ? 'text-emerald-400' : 'text-rose-400'}>
+                    {t.takerSide === 'YES' ? 'BUY' : 'SELL'}
+                  </span>{' '}
+                  <span className="text-white">{t.quantity}</span> @ <span className="text-emerald-400">{t.price}¢</span>
                 </span>
               ))}
           </div>

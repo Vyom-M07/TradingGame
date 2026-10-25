@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { AlertTriangle } from 'lucide-react';
 import { useReducer } from 'spacetimedb/react';
 import { reducers } from '../module_bindings';
-import type { Clue, GameState, LeaderboardEntry, Lobby, Market, Order, Player } from '../module_bindings/types';
+import type { BotConfig, Clue, GameState, LeaderboardEntry, Lobby, Market, Order, Player } from '../module_bindings/types';
 import { formatCents, rankLeaderboard } from '../components/RoundOverlays';
 
 /** Runs a reducer call and reports the outcome in the dashboard toast. */
@@ -669,8 +669,8 @@ export function ClassroomPanel({
   markets,
   players,
   onSelectLobby,
-  botsRunning,
-  onToggleBots,
+  botConfig,
+  whale,
   run,
 }: {
   lobbies: readonly Lobby[];
@@ -678,11 +678,12 @@ export function ClassroomPanel({
   markets: readonly Market[];
   players: readonly Player[];
   onSelectLobby: (code: string) => void;
-  botsRunning: boolean;
-  onToggleBots: () => void;
+  botConfig: BotConfig | null;
+  whale: Player | null;
   run: Run;
 }) {
   const resetBalances = useReducer(reducers.resetLobbyBalances);
+  const setBotConfig = useReducer(reducers.setBotConfig);
   const createLobby = useReducer(reducers.createLobby);
   const setPasscode = useReducer(reducers.setInstructorPasscode);
   const { armed, confirm } = useConfirm();
@@ -723,10 +724,9 @@ export function ClassroomPanel({
           <div className="truncate text-[7px] text-slate-500">{joinUrl}</div>
         </div>
 
+        <BotControls botConfig={botConfig} whale={whale} run={run} setBotConfig={setBotConfig} />
+
         <div className="grid grid-cols-2 gap-3">
-          <button className={`sign text-[9px] ${botsRunning ? 'sign-active' : ''}`} onClick={onToggleBots} title="Runs the market-making bots from this tab">
-            Bots {botsRunning ? 'ON' : 'OFF'}
-          </button>
           <button
             className="sign text-[9px]"
             disabled={!activeLobby}
@@ -787,5 +787,72 @@ export function ClassroomPanel({
         </details>
       </div>
     </Section>
+  );
+}
+
+const BOT_SPEEDS = [600, 1000, 2000];
+
+/** One switch for the robot traders and the AI whale across every open pit. */
+function BotControls({
+  botConfig,
+  whale,
+  run,
+  setBotConfig,
+}: {
+  botConfig: BotConfig | null;
+  whale: Player | null;
+  run: Run;
+  setBotConfig: (args: { ammEnabled: boolean; whaleEnabled: boolean; tickMs: number }) => Promise<unknown>;
+}) {
+  const amm = botConfig?.ammEnabled ?? false;
+  const whaleOn = botConfig?.whaleEnabled ?? true;
+  const tickMs = botConfig?.tickMs ?? 1000;
+  const allOn = amm && whaleOn;
+  const save = (label: string, next: { ammEnabled: boolean; whaleEnabled: boolean; tickMs: number }) =>
+    void run(label, () => setBotConfig(next));
+
+  return (
+    <div className="panel-inset space-y-3 p-3">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <div>AI WHALE &amp; MARKET MAKERS</div>
+          <div className="text-[7px] text-slate-500">Runs on the server for every open pit</div>
+        </div>
+        <button
+          className={`sign text-[9px] ${allOn ? 'sign-active' : ''}`}
+          onClick={() => save(allOn ? 'Bots stopped' : 'Bots started', { ammEnabled: !allOn, whaleEnabled: !allOn, tickMs })}
+        >
+          {allOn ? 'ON' : amm || whaleOn ? 'PARTIAL' : 'OFF'}
+        </button>
+      </div>
+      <div className="flex flex-wrap items-center gap-2 text-[8px]">
+        <button
+          className={`sign !px-2 !py-1 text-[8px] ${amm ? 'sign-active' : ''}`}
+          onClick={() => save(amm ? 'Robot traders off' : 'Robot traders on', { ammEnabled: !amm, whaleEnabled: whaleOn, tickMs })}
+        >
+          BOTS {amm ? 'ON' : 'OFF'}
+        </button>
+        <button
+          className={`sign !px-2 !py-1 text-[8px] ${whaleOn ? 'sign-active' : ''}`}
+          onClick={() => save(whaleOn ? 'Whale paused' : 'Whale trading', { ammEnabled: amm, whaleEnabled: !whaleOn, tickMs })}
+        >
+          WHALE {whaleOn ? 'ON' : 'OFF'}
+        </button>
+        <span className="ml-auto flex gap-1">
+          {BOT_SPEEDS.map(ms => (
+            <button
+              key={ms}
+              className={`sign !px-2 !py-1 text-[8px] ${tickMs === ms ? 'sign-active' : ''}`}
+              onClick={() => save(`Bot speed ${ms}ms`, { ammEnabled: amm, whaleEnabled: whaleOn, tickMs: ms })}
+            >
+              {ms < 1000 ? `${ms}ms` : `${ms / 1000}s`}
+            </button>
+          ))}
+        </span>
+      </div>
+      <div className="text-[7px] text-slate-500">
+        Whale sidecar: {whale?.onFloor ? `online as ${whale.username}` : 'offline (npm run whale)'}
+      </div>
+    </div>
   );
 }

@@ -63,8 +63,10 @@ const order = table(
     quantity: t.u32(),
     originalQuantity: t.u32(),
     isBot: t.bool(),
-    botRole: t.string(), // "NONE" | "AMM" | "SNIPER" | "MOMENTUM"
+    botRole: t.string(), // "NONE" | "AMM" | "SNIPER" | "NOISE"
     timestamp: t.timestamp(),
+    // bot_trader that owns this order (0 = a human, the whale or the house).
+    botId: t.u64().default(0n),
   }
 );
 
@@ -99,6 +101,8 @@ const trade = table(
     price: t.u32(), // execution price in cents (1-99 YES price)
     quantity: t.u32(),
     timestamp: t.timestamp(),
+    makerBotId: t.u64().default(0n), // bot_trader on each side, 0 if none
+    takerBotId: t.u64().default(0n),
   }
 );
 
@@ -187,6 +191,8 @@ const instructorConfig = table(
 // -----------------------------------------------------------------------------
 
 
+// Singleton (id = 0): who switched the house bots on, how fast they tick, and
+// whether the external whale sidecar may trade.
 const botConfig = table(
   { name: 'bot_config', public: true },
   {
@@ -194,17 +200,29 @@ const botConfig = table(
     ammEnabled: t.bool(),
     whaleEnabled: t.bool(),
     tickMs: t.u32(),
-    controlledBy: t.string(),
+    controlledBy: t.string(), // "" | "INSTRUCTOR" | "SOLO"
   }
 );
 
+// Private: repeating schedule that drives the bots while they are on.
+const botTimer = table(
+  { name: 'bot_timer' },
+  {
+    scheduledId: t.u64().primaryKey().autoInc(),
+    scheduledAt: t.scheduleAt(),
+  }
+);
+
+// Robot traders standing around the pits while the bots are on. They own the
+// house liquidity (MAKER), pick off mispriced orders (SNIPER) and cross the
+// spread now and then (NOISE). Bots trade on the house's account: no cash.
 const botTrader = table(
   { name: 'bot_trader', public: true },
   {
     botId: t.u64().primaryKey().autoInc(),
     name: t.string(),
-    role: t.string(),
-    marketId: t.u64(),
+    role: t.string(), // "MAKER" | "SNIPER" | "NOISE"
+    marketId: t.u64().index('btree'),
     x: t.i32(),
     y: t.i32(),
     direction: t.string(),
@@ -223,6 +241,7 @@ const spacetimedb = schema({
   lobbyParticipant,
   gameState,
   botConfig,
+  botTimer,
   botTrader,
   instructorConfig,
   activeConnection,
@@ -237,7 +256,11 @@ type ReadDb = ViewCtx<InferSchema<typeof spacetimedb>>['db'];
 
 const DEFAULT_INSTRUCTOR_PASSCODE = 'CALHACKS13';
 
-const AVATAR_TYPES = ['trader', 'businesswoman', 'robot', 'whale'];
+// Players may pick these. 'whale' is reserved for the AI sidecar (registerWhale)
+// and robots are only drawn for bot_trader rows.
+const AVATAR_TYPES = ['trader', 'businesswoman'];
+const WHALE_AVATAR = 'whale';
+const BOT_TICK_OPTIONS = [600, 1000, 2000];
 const SPAWN = { x: 3, y: 5 };
 const DISCONNECT_GRACE_MICROS = 120_000_000n; // 2 minutes
 
@@ -296,6 +319,13 @@ function requireInstructor(ctx: Ctx) {
     throw new SenderError('Forbidden: instructor role required');
   }
   return p;
+}
+
+function getBotConfig(ctx: Ctx) {
+  return (
+    ctx.db.botConfig.id.find(0) ??
+    ctx.db.botConfig.insert({ id: 0, ammEnabled: false, whaleEnabled: true, tickMs: 1000, controlledBy: '' })
+  );
 }
 
 function getGameState(ctx: Ctx) {
@@ -385,7 +415,15 @@ function getOrCreatePosition(ctx: Ctx, marketId: bigint, owner: any) {
 }
 
 
+function makerBotFor(ctx: Ctx, marketId: bigint) {
+  for (const b of ctx.db.botTrader.marketId.filter(marketId)) if (b.role === 'MAKER') return b.botId;
+  return 0n;
+}
+
 function seedMarketLiquidity(ctx: Ctx, marketId: bigint, fairPrice: number) {
+  const botId = makerBotFor(ctx, marketId);
+  // Sizes wobble +-30% so the book visibly breathes as the maker requotes.
+  const jitter = (qty: number) => Math.max(1, Math.round((qty * ctx.random.integerInRange(70, 130)) / 100));
   // Clear existing AMM bot orders for this market
   const existingOrders = [...ctx.db.order.marketId.filter(marketId)];
   // Bot orders carry no escrow, so they are simply replaced (including any
@@ -414,11 +452,12 @@ function seedMarketLiquidity(ctx: Ctx, marketId: bigint, fairPrice: number) {
         owner: ctx.identity, // the module itself is the market maker
         side: 'YES',
         price: p,
-        quantity: item.qty,
+        quantity: jitter(item.qty),
         originalQuantity: item.qty,
         isBot: true,
         botRole: 'AMM',
         timestamp: ctx.timestamp,
+        botId,
       });
     }
   }
@@ -442,11 +481,12 @@ function seedMarketLiquidity(ctx: Ctx, marketId: bigint, fairPrice: number) {
         owner: ctx.identity,
         side: 'NO',
         price: noBid,
-        quantity: item.qty,
+        quantity: jitter(item.qty),
         originalQuantity: item.qty,
         isBot: true,
         botRole: 'AMM',
         timestamp: ctx.timestamp,
+        botId,
       });
     }
   }
@@ -578,6 +618,19 @@ export const onDisconnect = spacetimedb.clientDisconnected(ctx => {
   // Another tab is still open for this identity.
   if ([...ctx.db.activeConnection.identity.filter(ctx.sender)].length > 0) return;
 
+  // The whale sidecar has no grace period: off the floor and out of the book now.
+  const p = ctx.db.player.identity.find(ctx.sender);
+  if (p?.avatarType === WHALE_AVATAR) {
+    let refund = 0n;
+    for (const o of [...ctx.db.order.owner.filter(ctx.sender)]) {
+      if (o.isBot) continue;
+      refund += BigInt(o.price) * BigInt(o.quantity);
+      ctx.db.order.orderId.delete(o.orderId);
+    }
+    ctx.db.player.identity.update({ ...p, onFloor: false, cashBalance: p.cashBalance + refund });
+    return;
+  }
+
   cancelDisconnectTimers(ctx, ctx.sender);
   ctx.db.disconnectTimer.insert({
     scheduledId: 0n,
@@ -611,6 +664,9 @@ export const joinGame = spacetimedb.reducer(
   (ctx, { name, avatarType }) => {
     const username = assertUniqueName(ctx, name);
     if (!AVATAR_TYPES.includes(avatarType)) throw new SenderError('Unknown avatar');
+    if (ctx.db.player.identity.find(ctx.sender)?.avatarType === WHALE_AVATAR) {
+      throw new SenderError('The whale joins with registerWhale');
+    }
     const p = getOrCreatePlayer(ctx);
     cancelDisconnectTimers(ctx, ctx.sender);
     ctx.db.player.identity.update({
@@ -890,7 +946,8 @@ function executeOrderMatch(
   price: number,
   quantity: number,
   isBot: boolean,
-  botRole: string
+  botRole: string,
+  botId: bigint = 0n
 ) {
   const normSide = side.toUpperCase();
   const m = ctx.db.market.marketId.find(marketId);
@@ -980,6 +1037,8 @@ function executeOrderMatch(
         price: yesExecPrice,
         quantity: matchQty,
         timestamp: ctx.timestamp,
+        makerBotId: resting.botId,
+        takerBotId: botId,
       });
 
       if (resting.quantity === matchQty) {
@@ -1041,6 +1100,8 @@ function executeOrderMatch(
         price: yesExecPrice,
         quantity: matchQty,
         timestamp: ctx.timestamp,
+        makerBotId: resting.botId,
+        takerBotId: botId,
       });
 
       if (resting.quantity === matchQty) {
@@ -1078,6 +1139,7 @@ function executeOrderMatch(
       isBot,
       botRole,
       timestamp: ctx.timestamp,
+      botId,
     });
   }
 
@@ -1317,68 +1379,206 @@ export const botReplenish = spacetimedb.reducer(
 );
 
 /**
- * Autonomous Optimal Bot Tick:
- * 1. SNIPER Bot: Executes positive EV crossing trades relative to fair value.
- * 2. AMM Bot: Tightens spreads and maintains dense two-sided depth around fair value.
+ * One bot tick for a single market. The scheduled bot_timer runs this for every
+ * open pit; kept as a reducer for manual testing.
  */
 export const optimalBotTick = spacetimedb.reducer(
   { marketId: t.u64() },
-  (ctx, { marketId }) => {
-    const m = ctx.db.market.marketId.find(marketId);
-    if (!m || m.status !== 'OPEN') return;
+  (ctx, { marketId }) => botTickMarket(ctx, marketId)
+);
 
-    let currentFair = m.fairPrice;
+function botTickMarket(ctx: Ctx, marketId: bigint) {
+  const m = ctx.db.market.marketId.find(marketId);
+  if (!m || m.status !== 'OPEN') return;
+  const bots = [...ctx.db.botTrader.marketId.filter(marketId)];
+  const sniper = bots.find(b => b.role === 'SNIPER');
+  const noise = bots.filter(b => b.role === 'NOISE');
 
-    // Small drift chance for dynamic news simulation
-    const driftRoll = ctx.random.integerInRange(1, 10);
-    if (driftRoll <= 3) {
-      const step = ctx.random.integerInRange(-2, 2);
-      currentFair = Math.max(5, Math.min(95, currentFair + step));
-      ctx.db.market.marketId.update({
-        ...m,
-        fairPrice: currentFair,
+  let currentFair = m.fairPrice;
+
+  // Small drift chance for dynamic news simulation
+  if (ctx.random.integerInRange(1, 10) <= 3) {
+    currentFair = Math.max(5, Math.min(95, currentFair + ctx.random.integerInRange(-2, 2)));
+    ctx.db.market.marketId.update({ ...m, fairPrice: currentFair });
+  }
+
+  const book = () => {
+    const orders = [...ctx.db.order.marketId.filter(marketId)].filter(o => o.quantity > 0);
+    const bids = orders.filter(o => o.side === 'YES').map(o => o.price);
+    const asks = orders.filter(o => o.side === 'NO').map(o => 100 - o.price);
+    return {
+      orders,
+      bestBid: bids.length > 0 ? Math.max(...bids) : 0,
+      bestAsk: asks.length > 0 ? Math.min(...asks) : 100,
+    };
+  };
+
+  // SNIPER: lift any ask below fair / hit any bid above fair.
+  let { orders, bestBid, bestAsk } = book();
+  let sniperExecuted = false;
+  if (bestAsk < currentFair) {
+    const resting = orders.find(o => o.side === 'NO' && 100 - o.price === bestAsk);
+    if (resting) {
+      const qty = Math.min(resting.quantity, 25);
+      executeOrderMatch(ctx, marketId, ctx.identity, 'YES', bestAsk, qty, true, 'SNIPER', sniper?.botId ?? 0n);
+      if (sniper) noteBotTrade(ctx, sniper.botId);
+      sniperExecuted = true;
+    }
+  } else if (bestBid > currentFair) {
+    const resting = orders.find(o => o.side === 'YES' && o.price === bestBid);
+    if (resting) {
+      const qty = Math.min(resting.quantity, 25);
+      executeOrderMatch(ctx, marketId, ctx.identity, 'NO', 100 - bestBid, qty, true, 'SNIPER', sniper?.botId ?? 0n);
+      if (sniper) noteBotTrade(ctx, sniper.botId);
+      sniperExecuted = true;
+    }
+  }
+
+  // NOISE: every so often cross the spread with a small order, leaning
+  // toward fair value, so the tape keeps moving.
+  for (const bot of noise) {
+    if (ctx.random.integerInRange(1, 100) > NOISE_TRADE_PERCENT) continue;
+    ({ bestBid, bestAsk } = book());
+    const last = ctx.db.market.marketId.find(marketId)?.lastTradedPrice ?? currentFair;
+    const yesOdds = Math.max(20, Math.min(80, 50 + (currentFair - last) * 6));
+    const buyYes = ctx.random.integerInRange(1, 100) <= yesOdds;
+    const qty = ctx.random.integerInRange(5, 25);
+    if (buyYes && bestAsk < 100) {
+      executeOrderMatch(ctx, marketId, ctx.identity, 'YES', bestAsk, qty, true, 'NOISE', bot.botId);
+      noteBotTrade(ctx, bot.botId);
+    } else if (!buyYes && bestBid > 0) {
+      executeOrderMatch(ctx, marketId, ctx.identity, 'NO', 100 - bestBid, qty, true, 'NOISE', bot.botId);
+      noteBotTrade(ctx, bot.botId);
+    }
+  }
+
+  // MAKER: keep tight two-sided depth around fair value.
+  ({ orders, bestBid, bestAsk } = book());
+  const spread = bestAsk - bestBid;
+  if (spread < 2 || spread > 4 || orders.length < 6 || !sniperExecuted) {
+    seedMarketLiquidity(ctx, marketId, currentFair);
+  }
+}
+
+const NOISE_TRADE_PERCENT = 30;
+
+function noteBotTrade(ctx: Ctx, botId: bigint) {
+  const b = ctx.db.botTrader.botId.find(botId);
+  if (b) ctx.db.botTrader.botId.update({ ...b, tradeCount: b.tradeCount + 1 });
+}
+
+/** Open markets with a floor pit or a lobby: the ones bots work. */
+function tradableMarkets(ctx: Ctx) {
+  const lobbyMarkets = new Set([...ctx.db.lobby.iter()].map(l => l.marketId));
+  return [...ctx.db.market.iter()].filter(
+    m => m.status === 'OPEN' && (m.locationX >= 0 || lobbyMarkets.has(m.marketId))
+  );
+}
+
+// Where bots stand: around the central trading post, or beside a market's booth.
+const CENTRAL_BOT_SPOTS = [
+  { x: 8, y: 4, direction: 'right' },
+  { x: 11, y: 7, direction: 'left' },
+  { x: 11, y: 4, direction: 'left' },
+  { x: 8, y: 7, direction: 'right' },
+  { x: 7, y: 5, direction: 'right' },
+  { x: 12, y: 6, direction: 'left' },
+  { x: 9, y: 3, direction: 'down' },
+  { x: 10, y: 8, direction: 'up' },
+];
+const CENTRAL_ROSTER = ['MAKER', 'SNIPER', 'NOISE', 'NOISE'];
+const PIT_ROSTER = ['MAKER', 'NOISE'];
+const BOT_NAMES: Record<string, string> = { MAKER: 'Maker-Bot', SNIPER: 'Sniper-Bot', NOISE: 'Noise-Bot' };
+
+/** Spawn a crew for every tradable market while bots are on; clear them when off. */
+function syncBots(ctx: Ctx) {
+  const enabled = ctx.db.botConfig.id.find(0)?.ammEnabled ?? false;
+  const markets = enabled ? tradableMarkets(ctx) : [];
+  const keep = new Set(markets.map(m => m.marketId));
+
+  for (const b of [...ctx.db.botTrader.iter()]) {
+    if (!keep.has(b.marketId)) ctx.db.botTrader.botId.delete(b.botId);
+  }
+
+  const counts: Record<string, number> = {};
+  let centralSlot = 0;
+  for (const b of ctx.db.botTrader.iter()) {
+    counts[b.role] = (counts[b.role] ?? 0) + 1;
+    if ((ctx.db.market.marketId.find(b.marketId)?.locationX ?? -1) < 0) centralSlot++;
+  }
+
+  for (const m of markets) {
+    if ([...ctx.db.botTrader.marketId.filter(m.marketId)].length > 0) continue;
+    const roster = m.locationX >= 0 ? PIT_ROSTER : CENTRAL_ROSTER;
+    roster.forEach((role, i) => {
+      const spot =
+        m.locationX >= 0
+          ? i === 0
+            ? { x: m.locationX - 1, y: m.locationY + 1, direction: 'right' }
+            : { x: m.locationX + 2, y: m.locationY, direction: 'left' }
+          : CENTRAL_BOT_SPOTS[centralSlot++ % CENTRAL_BOT_SPOTS.length];
+      counts[role] = (counts[role] ?? 0) + 1;
+      ctx.db.botTrader.insert({
+        botId: 0n,
+        name: `${BOT_NAMES[role]} ${counts[role]}`,
+        role,
+        marketId: m.marketId,
+        x: Math.max(0, Math.min(GRID_COLS - 1, spot.x)),
+        y: Math.max(1, Math.min(GRID_ROWS - 2, spot.y)),
+        direction: spot.direction,
+        tradeCount: 0,
       });
+    });
+    // The new maker takes over the house quotes straight away.
+    seedMarketLiquidity(ctx, m.marketId, m.fairPrice);
+  }
+}
+
+/** Apply a bot on/off switch: crew on the floor plus the repeating tick. */
+function applyBotConfig(
+  ctx: Ctx,
+  next: { ammEnabled: boolean; whaleEnabled: boolean; tickMs: number; controlledBy: string }
+) {
+  if (!BOT_TICK_OPTIONS.includes(next.tickMs)) throw new SenderError('Bot speed must be 600, 1000 or 2000 ms');
+  const cfg = getBotConfig(ctx);
+  ctx.db.botConfig.id.update({ ...cfg, ...next });
+
+  for (const timer of [...ctx.db.botTimer.iter()]) ctx.db.botTimer.scheduledId.delete(timer.scheduledId);
+  if (next.ammEnabled) {
+    ctx.db.botTimer.insert({ scheduledId: 0n, scheduledAt: ScheduleAt.interval(BigInt(next.tickMs) * 1000n) });
+  }
+  syncBots(ctx);
+}
+
+/** Server-side bots: one tick for every open pit and lobby market. */
+export const runBotTimer = spacetimedb.reducer(
+  { onSchedule: botTimer },
+  { timer: botTimer.rowType },
+  (ctx, { timer: _timer }) => {
+    if (!ctx.sender.equals(ctx.identity)) throw new SenderError('Scheduler only');
+    syncBots(ctx); // markets may have been deployed or resolved since the last tick
+    if (getGameState(ctx).isLeaderboardRevealed) return;
+    for (const m of tradableMarkets(ctx)) botTickMarket(ctx, m.marketId);
+  }
+);
+
+/**
+ * Solo play: any trader can switch the bots on or off, unless the instructor
+ * has taken control of them for the class.
+ */
+export const setSoloBots = spacetimedb.reducer(
+  { enabled: t.bool(), tickMs: t.u32() },
+  (ctx, { enabled, tickMs }) => {
+    const cfg = getBotConfig(ctx);
+    if (cfg.controlledBy === 'INSTRUCTOR' && cfg.ammEnabled) {
+      throw new SenderError('Your instructor is running the bots for the class');
     }
-
-    const marketOrders = [...ctx.db.order.marketId.filter(marketId)];
-
-    const yesBids = marketOrders
-      .filter(o => o.side === 'YES' && o.quantity > 0)
-      .map(o => o.price);
-    const bestYesBid = yesBids.length > 0 ? Math.max(...yesBids) : 0;
-
-    const yesAsks = marketOrders
-      .filter(o => o.side === 'NO' && o.quantity > 0)
-      .map(o => 100 - o.price);
-    const bestYesAsk = yesAsks.length > 0 ? Math.min(...yesAsks) : 100;
-
-    let sniperExecuted = false;
-
-    // SNIPER BOT: Exploit positive EV mispricings
-    if (bestYesAsk < currentFair) {
-      const targetAsk = bestYesAsk;
-      const matchOrder = marketOrders.find(o => o.side === 'NO' && 100 - o.price === targetAsk);
-      if (matchOrder) {
-        const tradeQty = Math.min(matchOrder.quantity, 25);
-        executeOrderMatch(ctx, marketId, ctx.identity, 'YES', targetAsk, tradeQty, true, 'SNIPER');
-        sniperExecuted = true;
-      }
-    } else if (bestYesBid > currentFair) {
-      const targetBid = bestYesBid;
-      const matchOrder = marketOrders.find(o => o.side === 'YES' && o.price === targetBid);
-      if (matchOrder) {
-        const noPrice = 100 - targetBid;
-        const tradeQty = Math.min(matchOrder.quantity, 25);
-        executeOrderMatch(ctx, marketId, ctx.identity, 'NO', noPrice, tradeQty, true, 'SNIPER');
-        sniperExecuted = true;
-      }
-    }
-
-    // AMM BOT: Maintain tight spreads and depth
-    const currentSpread = bestYesAsk - bestYesBid;
-    if (currentSpread < 2 || currentSpread > 4 || marketOrders.length < 6 || !sniperExecuted) {
-      seedMarketLiquidity(ctx, marketId, currentFair);
-    }
+    applyBotConfig(ctx, {
+      ammEnabled: enabled,
+      whaleEnabled: cfg.whaleEnabled,
+      tickMs,
+      controlledBy: enabled ? 'SOLO' : '',
+    });
   }
 );
 
@@ -1481,58 +1681,12 @@ export const registerWhale = spacetimedb.reducer(
   }
 );
 
-/** Solo player toggle for market maker bots on the floor. */
-export const setSoloBots = spacetimedb.reducer(
-  { enabled: t.bool(), tickMs: t.u32() },
-  (ctx, { enabled, tickMs }) => {
-    const cfg = ctx.db.botConfig.id.find(0);
-    if (cfg && cfg.ammEnabled && cfg.controlledBy === 'INSTRUCTOR') {
-      throw new SenderError('Bots are currently controlled by the instructor');
-    }
-    const speed = tickMs >= 200 && tickMs <= 5000 ? tickMs : 1000;
-    if (cfg) {
-      ctx.db.botConfig.id.update({
-        ...cfg,
-        ammEnabled: enabled,
-        tickMs: speed,
-        controlledBy: 'STUDENT',
-      });
-    } else {
-      ctx.db.botConfig.insert({
-        id: 0,
-        ammEnabled: enabled,
-        whaleEnabled: true,
-        tickMs: speed,
-        controlledBy: 'STUDENT',
-      });
-    }
-  }
-);
-
-/** Instructor global configuration for bots and the AI Whale. */
+/** Switch the bots and the AI whale on or off for every pit (Instructor only). */
 export const setBotConfig = spacetimedb.reducer(
   { ammEnabled: t.bool(), whaleEnabled: t.bool(), tickMs: t.u32() },
   (ctx, { ammEnabled, whaleEnabled, tickMs }) => {
     requireInstructor(ctx);
-    const speed = tickMs >= 200 && tickMs <= 5000 ? tickMs : 1000;
-    const cfg = ctx.db.botConfig.id.find(0);
-    if (cfg) {
-      ctx.db.botConfig.id.update({
-        ...cfg,
-        ammEnabled,
-        whaleEnabled,
-        tickMs: speed,
-        controlledBy: 'INSTRUCTOR',
-      });
-    } else {
-      ctx.db.botConfig.insert({
-        id: 0,
-        ammEnabled,
-        whaleEnabled,
-        tickMs: speed,
-        controlledBy: 'INSTRUCTOR',
-      });
-    }
+    applyBotConfig(ctx, { ammEnabled, whaleEnabled, tickMs, controlledBy: ammEnabled ? 'INSTRUCTOR' : '' });
   }
 );
 
@@ -1562,7 +1716,7 @@ export const leaderboard = spacetimedb.view(
 
     const rows = [];
     for (const p of ctx.db.player.iter()) {
-      if (p.role === 'INSTRUCTOR') continue;
+      if (p.role === 'INSTRUCTOR' || p.avatarType === WHALE_AVATAR) continue;
       const v = valuePlayer(ctx.db, p.identity, p.cashBalance);
       rows.push({
         identity: p.identity,

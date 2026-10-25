@@ -12,7 +12,7 @@
 //
 // Environment (read from the shell, then .env.local, then .env.development /
 // .env.production):
-//   ANTHROPIC_API_KEY        optional; enables the Claude decision engine
+//   ANTHROPIC_API_KEY        optional; enables the Claude decision engine (any env file)
 //   WHALE_PASSCODE           instructor passcode (default CALHACKS13)
 //   WHALE_NAME               display name (default "The Whale [AI]")
 //   VITE_SPACETIMEDB_URI     e.g. ws://localhost:3000
@@ -21,6 +21,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parseEnv } from 'node:util';
 import Anthropic from '@anthropic-ai/sdk';
 import { zodOutputFormat } from '@anthropic-ai/sdk/helpers/zod';
 import { z } from 'zod/v4';
@@ -32,9 +33,19 @@ import type { Clue, Market, Order } from '../src/module_bindings/types.ts';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CLOUD = process.argv.includes('--cloud');
-for (const file of ['.env.local', CLOUD ? '.env.production' : '.env.development']) {
+const ENV_FILES = ['.env.local', CLOUD ? '.env.production' : '.env.development', '.env.production', '.env.development', '.env'];
+const readEnv = (file: string) => {
   const full = path.join(ROOT, file);
-  if (fs.existsSync(full)) process.loadEnvFile(full); // never overrides the shell
+  return fs.existsSync(full) ? parseEnv(fs.readFileSync(full, 'utf8')) : {};
+};
+// Server settings come from .env.local plus the target's file; the shell always wins.
+for (const file of ENV_FILES.slice(0, 2)) {
+  for (const [key, value] of Object.entries(readEnv(file))) process.env[key] ??= value;
+}
+// The API key may live in any of the env files.
+for (const file of ENV_FILES) {
+  const key = readEnv(file).ANTHROPIC_API_KEY;
+  if (key && !process.env.ANTHROPIC_API_KEY) process.env.ANTHROPIC_API_KEY = key;
 }
 
 const HOST = process.env.VITE_SPACETIMEDB_URI || 'ws://localhost:3000';

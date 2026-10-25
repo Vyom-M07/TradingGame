@@ -22,4 +22,6 @@ export default __t.row({
   price: __t.u32(),
   quantity: __t.u32(),
   timestamp: __t.timestamp(),
+  makerBotId: __t.u64().name("maker_bot_id"),
+  takerBotId: __t.u64().name("taker_bot_id"),
 });

@@ -21,4 +21,5 @@ export default __t.row({
   isBot: __t.bool().name("is_bot"),
   botRole: __t.string().name("bot_role"),
   timestamp: __t.timestamp(),
+  botId: __t.u64().name("bot_id"),
 });

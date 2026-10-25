@@ -97,6 +97,9 @@ const tablesSchema = __schema({
       { accessor: 'botId', name: 'bot_trader_bot_id_idx_btree', algorithm: 'btree', columns: [
         'botId',
       ] },
+      { accessor: 'marketId', name: 'bot_trader_market_id_idx_btree', algorithm: 'btree', columns: [
+        'marketId',
+      ] },
     ],
     constraints: [
       { name: 'bot_trader_bot_id_key', constraint: 'unique', columns: ['botId'] },

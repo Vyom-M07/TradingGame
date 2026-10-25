@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useReducer, useSpacetimeDB, useTable } from 'spacetimedb/react';
 import { reducers, tables } from '../module_bindings';
 import {
@@ -10,8 +10,6 @@ import {
   RoundControl,
   type Run,
 } from './panels';
-
-const BOT_TICK_MS = 600;
 
 /** /instructor — the teacher's control room. Deliberately loads no Phaser. */
 export default function InstructorApp() {
@@ -25,8 +23,6 @@ export default function InstructorApp() {
   const [leaderboard] = useTable(tables.leaderboard);
   const [botConfigs] = useTable(tables.botConfig);
   const claimInstructor = useReducer(reducers.claimInstructor);
-  const botTick = useReducer(reducers.optimalBotTick);
-  const setBotConfig = useReducer(reducers.setBotConfig);
 
   const myHex = identity?.toHexString() ?? '';
   const me = useMemo(() => players.find(p => p.identity.toHexString() === myHex) ?? null, [players, myHex]);
@@ -57,31 +53,6 @@ export default function InstructorApp() {
       return false;
     }
   }, []);
-
-  // Market-making bots run from this tab: the lobby market plus every open floor pit.
-  const botConfig = botConfigs[0] ?? null;
-  const botsRunning = !!botConfig?.ammEnabled && botConfig?.controlledBy === 'INSTRUCTOR';
-  const botTargets = useRef<bigint[]>([]);
-  botTargets.current = markets
-    .filter(m => m.status === 'OPEN' && (m.locationX >= 0 || m.marketId === activeLobby?.marketId))
-    .map(m => m.marketId);
-  useEffect(() => {
-    if (!botsRunning || !connected) return;
-    let i = 0;
-    const timer = setInterval(() => {
-      const targets = botTargets.current;
-      if (targets.length === 0) return;
-      void botTick({ marketId: targets[i++ % targets.length] }).catch(() => undefined);
-    }, BOT_TICK_MS);
-    return () => clearInterval(timer);
-  }, [botsRunning, connected, botTick]);
-
-  const handleToggleBots = useCallback(() => {
-    const next = !botsRunning;
-    void run(next ? 'Bots activated for all students' : 'Bots stopped', () =>
-      setBotConfig({ ammEnabled: next, tickMs: BOT_TICK_MS, whaleEnabled: true })
-    );
-  }, [botsRunning, run, setBotConfig]);
 
   const studentCount = players.filter(p => p.role !== 'INSTRUCTOR').length;
 
@@ -135,8 +106,8 @@ export default function InstructorApp() {
               markets={markets}
               players={players}
               onSelectLobby={setLobbyCode}
-              botsRunning={botsRunning}
-              onToggleBots={handleToggleBots}
+              botConfig={botConfigs[0] ?? null}
+              whale={players.find(p => p.avatarType === 'whale') ?? null}
               run={run}
             />
           </div>

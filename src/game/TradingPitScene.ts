@@ -6,6 +6,7 @@ import {
   AVATAR_TYPES,
   FACINGS,
   MINIMAP_RECT,
+  agentLabel,
   facingFor,
   type AgentKind,
   type AvatarType,
@@ -863,17 +864,16 @@ export class TradingPitScene extends Phaser.Scene {
     const shadow = this.add.ellipse(0, 14, 18, 6, 0x000000, 0.3);
     const sprite = this.add.sprite(0, 16, this.textureFor({ kind, avatarType }, facing)).setOrigin(0.5, 1);
     const style = AGENT_STYLE[kind];
-    if (style.tint !== null && !this.usesOwnSprite(kind)) sprite.setTint(style.tint);
+    if (style.tint !== null && !this.usesOwnSprite(kind) && !AVATARS[avatarType].robotic) sprite.setTint(style.tint);
     body.add([shadow, sprite]);
     body.setDepth(body.y + 16);
 
     const overhead = this.add.container(body.x, body.y).setDepth(100000);
-    const label = style.tag ? `${name} [${style.tag}]` : name;
-    const nameText = this.nameLabel(label, style.nameColor);
+    const nameText = this.nameLabel(agentLabel(name, kind), style.nameColor);
     overhead.add(nameText);
     this.ignoreOnMinimap(overhead);
 
-    const markerColor = kind === 'human' ? 0xff3b3b : kind === 'claude' ? 0xff9a5c : 0x4fc3ff;
+    const markerColor = { human: 0xff3b3b, claude: 0xff9a5c, whale: 0xfacc15, bot: 0x4fc3ff }[kind];
     const marker = this.add.rectangle(body.x, body.y, 26, 26, markerColor).setStrokeStyle(4, 0xffffff).setDepth(200000);
     this.cameras.main.ignore(marker);
 
@@ -989,7 +989,7 @@ export class TradingPitScene extends Phaser.Scene {
       }
 
       const style = AGENT_STYLE[p.kind];
-      this.setName(a, style.tag ? `${p.username} [${style.tag}]` : p.username, style.nameColor);
+      this.setName(a, agentLabel(p.username, p.kind), style.nameColor);
 
       if (p.x !== a.gridX || p.y !== a.gridY) {
         const dist = Math.abs(p.x - a.gridX) + Math.abs(p.y - a.gridY);

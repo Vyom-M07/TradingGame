@@ -81,8 +81,8 @@ export function HelpDialog({ isOpen, onClose }: { isOpen: boolean; onClose: () =
           cancel it.
         </p>
         <p>
-          Watch the ticker and the news flashes: the host reveals clues that move the fair price. Bots (blue) and the
-          Claude agent (orange) trade alongside you.
+          Watch the ticker and the news flashes: the host reveals clues that move the fair price. Robot bots (blue) and
+          the AI Whale (gold) trade alongside you; switch the bots on from <span className="bg-ink px-1 text-white">BOTS</span>.
         </p>
       </div>
     </PixelDialog>
