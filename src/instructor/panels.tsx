@@ -67,7 +67,8 @@ export function RoundControl({ lobby, run, studentCount }: { lobby: Lobby | null
         <div>
           <div className="text-[14px]">ROUND OVER · {lobby.code}</div>
           <div className="mt-2 text-[9px] leading-relaxed text-slate-600">
-            Students are frozen on the final podium and trading is closed.
+            Students are frozen on the final podium and trading is closed. Starting a new round removes anyone
+            offline for over 2 minutes from the room and the leaderboard.
           </div>
         </div>
         <button

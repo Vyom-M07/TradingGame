@@ -1986,13 +1986,24 @@ export const endLobbyRound = spacetimedb.reducer(
   }
 );
 
-/** Hide a room's leaderboard again and reopen its trading. */
+/**
+ * Hide a room's leaderboard again and reopen its trading. In class rooms, players
+ * gone for over 2 minutes (avatar already off the floor) are sent back to the
+ * menu, which also drops them from the leaderboard; they keep their wallet if
+ * they come back, like after a kick.
+ */
 export const startLobbyRound = spacetimedb.reducer(
   { lobbyId: t.u64() },
   (ctx, { lobbyId }) => {
     const l = requireLobby(ctx, lobbyId);
     requireRoomController(ctx, l);
     ctx.db.lobby.lobbyId.update({ ...l, roundOver: false });
+    if (l.isSolo) return;
+    for (const p of [...ctx.db.player.iter()]) {
+      if (p.lobbyId === lobbyId && !p.onFloor && !isWhale(p)) {
+        ctx.db.player.identity.update({ ...p, lobbyId: 0n });
+      }
+    }
   }
 );
 
