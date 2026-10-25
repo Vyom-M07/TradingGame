@@ -158,6 +158,10 @@ export function TradingPitOverlay({
 
   if (!isOpen) return null;
 
+  // Resolved by the instructor: winning shares already paid out at $1 each.
+  const resolved = market?.status === 'RESOLVED';
+  const winningSide = market?.winningSide ?? '';
+
   const ladderRow = (level: Level, kind: 'ask' | 'bid') => {
     const isAsk = kind === 'ask';
     return (
@@ -253,6 +257,17 @@ export function TradingPitOverlay({
             </div>
           </div>
 
+          {resolved && (
+            <div
+              className={`flex items-center justify-between gap-3 border-b-2 border-slate-700 px-4 py-3 text-[10px] ${
+                winningSide === 'YES' ? 'bg-emerald-600/30 text-emerald-200' : 'bg-rose-600/30 text-rose-200'
+              }`}
+            >
+              <span>MARKET RESOLVED · {winningSide} WON</span>
+              <span className="text-[8px] text-slate-300">Winning contracts paid $1.00 each · trading closed</span>
+            </div>
+          )}
+
           <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 overflow-y-auto p-4 lg:grid-cols-12">
             {/* Order book ladder */}
             <div className="flex flex-col border-2 border-slate-700 p-3 lg:col-span-7">
@@ -306,6 +321,15 @@ export function TradingPitOverlay({
             </div>
 
             {/* Trade ticket */}
+            {resolved ? (
+              <div className="flex flex-col items-center justify-center gap-4 border-2 border-slate-700 p-6 text-center lg:col-span-5">
+                <div className="text-[9px] text-slate-400">FINAL OUTCOME</div>
+                <div className={`text-[28px] ${winningSide === 'YES' ? 'text-emerald-400' : 'text-rose-400'}`}>{winningSide}</div>
+                <div className="text-[8px] leading-relaxed text-slate-400">
+                  Every {winningSide} contract paid out $1.00 to your cash. Open orders were refunded.
+                </div>
+              </div>
+            ) : (
             <div className="flex flex-col gap-4 border-2 border-slate-700 p-3 lg:col-span-5">
               <div className="flex items-center justify-between border-b-2 border-slate-700 pb-2">
                 <span className="text-[9px] text-slate-200">TICKET</span>
@@ -428,6 +452,7 @@ export function TradingPitOverlay({
                 {isSubmitting ? 'MATCHING...' : `${side === 'YES' ? 'BID' : 'ASK'} ${quantity} @ ${price}¢`}
               </button>
             </div>
+            )}
           </div>
 
           {/* Tape */}

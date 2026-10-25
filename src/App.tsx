@@ -261,6 +261,19 @@ export default function App() {
     }
   }, [gameState, gameStateReady]);
 
+  // Keep ?lobby= in the address bar matching the class room we're in, so a
+  // copied or refreshed URL never points back at a room we've left.
+  useEffect(() => {
+    // Not before login: the login screen still needs the shared ?lobby= code.
+    if (!currentPlayer || !joined) return;
+    const url = new URL(window.location.href);
+    const code = activeLobby && !activeLobby.isSolo ? activeLobby.code : null;
+    if ((url.searchParams.get('lobby') ?? null) === code) return;
+    if (code) url.searchParams.set('lobby', code);
+    else url.searchParams.delete('lobby');
+    window.history.replaceState(null, '', url);
+  }, [currentPlayer, activeLobby, joined]);
+
   // Sent back to the menu without pressing Leave: an instructor kicked us.
   const leavingRef = useRef(false);
   const lastLobbyId = useRef<bigint | null>(null);

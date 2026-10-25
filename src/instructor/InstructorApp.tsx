@@ -22,6 +22,7 @@ export default function InstructorApp() {
   const [gameStates] = useTable(tables.gameState);
   const [leaderboard] = useTable(tables.leaderboard);
   const claimInstructor = useReducer(reducers.claimInstructor);
+  const setPlayerRole = useReducer(reducers.setPlayerRole);
 
   const myHex = identity?.toHexString() ?? '';
   const me = useMemo(() => players.find(p => p.identity.toHexString() === myHex) ?? null, [players, myHex]);
@@ -114,6 +115,13 @@ export default function InstructorApp() {
             <a className="sign !px-3 !py-2 text-[9px]" href={activeLobby ? `/?lobby=${activeLobby.code}` : '/'} target="_blank" rel="noreferrer">
               Open Floor ↗
             </a>
+            <button
+              className="sign !px-3 !py-2 text-[9px]"
+              title="Give up the instructor role on this browser; the passcode unlocks it again"
+              onClick={() => identity && void run('Signed out', () => setPlayerRole({ target: identity, role: 'STUDENT' }))}
+            >
+              Sign out
+            </button>
           </div>
         </div>
       </header>
