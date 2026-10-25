@@ -68,7 +68,23 @@ export default function InstructorApp() {
   ).length;
 
   if (!connected || !playersReady) {
-    return <Screen><div className="panel p-6 text-[11px]">Connecting to the exchange…</div></Screen>;
+    return (
+      <Screen>
+        <div className="panel p-6 text-[11px] text-center space-y-3">
+          <div>Connecting to the exchange…</div>
+          <button
+            type="button"
+            className="sign text-[8px] text-slate-500 hover:text-ink cursor-pointer"
+            onClick={() => {
+              localStorage.clear();
+              window.location.reload();
+            }}
+          >
+            Clear saved cache & reconnect
+          </button>
+        </div>
+      </Screen>
+    );
   }
 
   if (!isInstructor) {

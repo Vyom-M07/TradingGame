@@ -64,13 +64,22 @@ function Root() {
     };
 
     const onConnectError = (_ctx: ErrorContext, err: Error) => {
-      console.log(`Error connecting profile [${activeProfile}]:`, err);
+      console.warn(`Error connecting profile [${activeProfile}]:`, err);
+      // When SpacetimeDB is reset or published with --delete-data, the cached auth token
+      // becomes unauthorized (401). Clear the stale token so we can connect anonymously.
+      const savedToken = localStorage.getItem(tokenKey);
+      if (savedToken) {
+        console.warn(`Clearing stale auth token for [${activeProfile}] and reloading...`);
+        localStorage.removeItem(tokenKey);
+        window.location.reload();
+      }
     };
 
     return DbConnection.builder()
       .withUri(HOST)
       .withDatabaseName(DB_NAME)
       .withToken(localStorage.getItem(tokenKey) || undefined)
+      .withAutomaticReconnect()
       .onConnect(onConnect)
       .onDisconnect(onDisconnect)
       .onConnectError(onConnectError);

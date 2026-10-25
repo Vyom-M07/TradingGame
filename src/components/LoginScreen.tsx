@@ -106,7 +106,19 @@ export function LoginScreen({ connected, ready, players, me, initialCode, onJoin
           {error && <div className="border-[3px] border-rose-600 bg-rose-50 p-2 leading-relaxed text-rose-700">{error}</div>}
 
           {!connected || !ready ? (
-            <div className="sign w-full !py-4 text-[13px] opacity-50">Connecting…</div>
+            <div className="space-y-2">
+              <div className="sign w-full !py-4 text-[13px] opacity-50">Connecting…</div>
+              <button
+                type="button"
+                className="w-full text-center text-[8px] text-slate-500 hover:text-ink underline cursor-pointer"
+                onClick={() => {
+                  localStorage.clear();
+                  window.location.reload();
+                }}
+              >
+                Clear saved cache & reconnect
+              </button>
+            </div>
           ) : (
             <div className="space-y-3">
               <div className="text-slate-500">JOIN YOUR CLASS</div>
