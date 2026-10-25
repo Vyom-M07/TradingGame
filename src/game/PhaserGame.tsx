@@ -1,9 +1,11 @@
 import { useEffect, useRef } from 'react';
 import * as Phaser from 'phaser';
-import { TradingPitScene, PlayerData } from './TradingPitScene';
+import { TradingPitScene, PlayerData, PitData } from './TradingPitScene';
 
 interface PhaserGameProps {
   players: PlayerData[];
+  pits: PitData[];
+  alertMessage: string;
   myIdentityHex: string;
   activeMarketQuestion?: string;
   lastTradedPrice?: number;
@@ -12,12 +14,14 @@ interface PhaserGameProps {
   minimapVisible: boolean;
   onPlayerMove: (x: number, y: number, direction: string) => void;
   onTogglePitOverlay: (open?: boolean) => void;
-  onProximityChange?: (inPit: boolean) => void;
+  onProximityChange?: (pitId: string | null) => void;
   onSceneReady?: (scene: TradingPitScene) => void;
 }
 
 export function PhaserGame({
   players,
+  pits,
+  alertMessage,
   myIdentityHex,
   activeMarketQuestion = 'CAL HACKS 13.0 FLOOR OPEN',
   lastTradedPrice = 50,
@@ -34,12 +38,12 @@ export function PhaserGame({
 
   // Keep the latest props available to the scene once it boots.
   const latest = useRef({
-    players, myIdentityHex, activeMarketQuestion, lastTradedPrice, marketVolume, inputEnabled, minimapVisible,
-    onPlayerMove, onTogglePitOverlay, onProximityChange, onSceneReady,
+    players, pits, alertMessage, myIdentityHex, activeMarketQuestion, lastTradedPrice, marketVolume, inputEnabled,
+    minimapVisible, onPlayerMove, onTogglePitOverlay, onProximityChange, onSceneReady,
   });
   latest.current = {
-    players, myIdentityHex, activeMarketQuestion, lastTradedPrice, marketVolume, inputEnabled, minimapVisible,
-    onPlayerMove, onTogglePitOverlay, onProximityChange, onSceneReady,
+    players, pits, alertMessage, myIdentityHex, activeMarketQuestion, lastTradedPrice, marketVolume, inputEnabled,
+    minimapVisible, onPlayerMove, onTogglePitOverlay, onProximityChange, onSceneReady,
   };
 
   useEffect(() => {
@@ -71,16 +75,18 @@ export function PhaserGame({
           scene.setCallbacks({
             onPlayerMove: (x, y, d) => latest.current.onPlayerMove(x, y, d),
             onTogglePitOverlay: open => latest.current.onTogglePitOverlay(open),
-            onProximityChange: inPit => latest.current.onProximityChange?.(inPit),
+            onProximityChange: pitId => latest.current.onProximityChange?.(pitId),
             myIdentityHex: p.myIdentityHex,
           });
           scene.setInputEnabled(p.inputEnabled);
           scene.setMinimapVisible(p.minimapVisible);
           scene.updateMarketTicker(p.activeMarketQuestion, p.lastTradedPrice, p.marketVolume);
+          scene.setAlert(p.alertMessage);
           scene.syncPlayers(p.players, p.myIdentityHex);
+          scene.syncPits(p.pits);
           p.onSceneReady?.(scene);
         };
-        if (scene.sys.isActive() && scene.children) onCreate();
+        if (scene.sys.isActive()) onCreate();
         else scene.events.once(Phaser.Scenes.Events.CREATE, onCreate);
       });
     });
@@ -99,6 +105,14 @@ export function PhaserGame({
   useEffect(() => {
     sceneRef.current?.syncPlayers(players, myIdentityHex);
   }, [players, myIdentityHex]);
+
+  useEffect(() => {
+    sceneRef.current?.syncPits(pits);
+  }, [pits]);
+
+  useEffect(() => {
+    sceneRef.current?.setAlert(alertMessage);
+  }, [alertMessage]);
 
   useEffect(() => {
     sceneRef.current?.updateMarketTicker(activeMarketQuestion, lastTradedPrice, marketVolume);

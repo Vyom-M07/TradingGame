@@ -10,13 +10,10 @@ interface HudProps {
   activeLobby: Lobby | null;
   isInstructor: boolean;
   isInsidePit: boolean;
-  isAutoBotRunning: boolean;
   minimapVisible: boolean;
   onToggleMinimap: () => void;
-  onToggleAutoBot: () => void;
   onOpenTradingPit: () => void;
   onOpenLobby: () => void;
-  onOpenInstructor: () => void;
   onOpenHelp: () => void;
   onOpenProfile: () => void;
   onDirection: (direction: string | null) => void;
@@ -39,9 +36,9 @@ function Logo() {
   return (
     <div className="absolute left-5 top-4 hidden sm:block">
       <div className="logo-text font-pixel text-[30px] leading-[1.15] tracking-tight">
-        OPEN
+        SERIOUS
         <br />
-        OUTCRY
+        TRADING
       </div>
       <div className="logo-text mt-2 flex items-center gap-2 font-pixel text-[9px]">
         <span className="inline-block h-[3px] w-6 bg-white shadow-[0_0_0_2px_#1d1b2a]" />
@@ -94,12 +91,9 @@ function TopNav({
   activeLobby,
   isInstructor,
   isInsidePit,
-  isAutoBotRunning,
   player,
   onOpenTradingPit,
   onOpenLobby,
-  onOpenInstructor,
-  onToggleAutoBot,
   onOpenProfile,
 }: HudProps) {
   return (
@@ -118,20 +112,11 @@ function TopNav({
           Lobby <span className="text-amber-600">{activeLobby?.code ?? '----'}</span>
         </button>
       </div>
-      <div className="hang-top">
-        <button
-          className={`sign ${isAutoBotRunning ? 'sign-active' : ''}`}
-          onClick={onToggleAutoBot}
-          title="Toggle the market-making bot"
-        >
-          Bots {isAutoBotRunning ? 'ON' : 'OFF'}
-        </button>
-      </div>
       {isInstructor && (
         <div className="hang-top">
-          <button className="sign" onClick={onOpenInstructor} title="Instructor controls">
-            Host
-          </button>
+          <a className="sign sign-active" href="/instructor" target="_blank" rel="noreferrer" title="Open the instructor dashboard">
+            Dashboard
+          </a>
         </div>
       )}
       <div className="hang-top">

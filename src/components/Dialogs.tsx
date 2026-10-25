@@ -75,8 +75,10 @@ export function HelpDialog({ isOpen, onClose }: { isOpen: boolean; onClose: () =
         </p>
         <p>
           Walk onto the <span className="text-emerald-700">green carpet</span> in the middle of the hall and press{' '}
-          <span className="bg-ink px-1 text-white">E</span> to open the order book. Buy YES if you think the price is
-          too low, NO if it is too high.
+          <span className="bg-ink px-1 text-white">E</span> to open the order book. Place a{' '}
+          <span className="text-emerald-700">Bid</span> if you think the price is too low, an{' '}
+          <span className="text-rose-600">Ask</span> if it is too high. Your cash is held in escrow until the order fills or you
+          cancel it.
         </p>
         <p>
           Watch the ticker and the news flashes: the host reveals clues that move the fair price. Bots (blue) and the
@@ -96,11 +98,15 @@ export function ProfileDialog({
   isOpen: boolean;
   onClose: () => void;
   username: string;
-  onSave: (name: string) => void;
+  onSave: (name: string) => Promise<unknown>;
 }) {
   const [value, setValue] = useState(username);
+  const [error, setError] = useState('');
   useEffect(() => {
-    if (isOpen) setValue(username);
+    if (isOpen) {
+      setValue(username);
+      setError('');
+    }
   }, [isOpen, username]);
 
   const trimmed = value.trim();
@@ -110,11 +116,15 @@ export function ProfileDialog({
     <PixelDialog isOpen={isOpen} onClose={onClose} title="Trader Name" width="max-w-sm">
       <form
         className="space-y-4 text-[10px]"
-        onSubmit={e => {
+        onSubmit={async e => {
           e.preventDefault();
           if (!valid) return;
-          onSave(trimmed);
-          onClose();
+          try {
+            await onSave(trimmed);
+            onClose();
+          } catch (err) {
+            setError(err instanceof Error ? err.message : String(err));
+          }
         }}
       >
         <input
@@ -124,7 +134,8 @@ export function ProfileDialog({
           onChange={e => setValue(e.target.value)}
           className="panel-inset w-full px-3 py-3 text-[12px] outline-none focus:bg-white"
         />
-        <div className="text-slate-500">2-24 characters. Shown above your head on the floor.</div>
+        <div className="text-slate-500">2-24 characters, unique on the floor. Shown above your head.</div>
+        {error && <div className="border-[3px] border-rose-600 bg-rose-50 p-2 text-rose-700">{error}</div>}
         <button type="submit" disabled={!valid} className="sign sign-active w-full disabled:opacity-50">
           Save
         </button>

@@ -15,4 +15,6 @@ export default {
   category: __t.string(),
   description: __t.string(),
   initialPrice: __t.u32(),
+  locationX: __t.i32(),
+  locationY: __t.i32(),
 };

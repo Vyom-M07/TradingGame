@@ -35,11 +35,15 @@ import {
 
 // Import all reducer arg schemas
 import BotReplenishReducer from "./bot_replenish_reducer";
+import BroadcastAlertReducer from "./broadcast_alert_reducer";
 import CancelOrderReducer from "./cancel_order_reducer";
+import ClaimInstructorReducer from "./claim_instructor_reducer";
 import ClearCluesReducer from "./clear_clues_reducer";
 import CreateLobbyReducer from "./create_lobby_reducer";
 import CreateMarketReducer from "./create_market_reducer";
+import JoinGameReducer from "./join_game_reducer";
 import JoinLobbyReducer from "./join_lobby_reducer";
+import ModifyMarketReducer from "./modify_market_reducer";
 import MovePlayerReducer from "./move_player_reducer";
 import OptimalBotTickReducer from "./optimal_bot_tick_reducer";
 import PlaceOrderReducer from "./place_order_reducer";
@@ -47,12 +51,18 @@ import ResetLobbyBalancesReducer from "./reset_lobby_balances_reducer";
 import ResetMarketReducer from "./reset_market_reducer";
 import ResolveMarketReducer from "./resolve_market_reducer";
 import RevealClueReducer from "./reveal_clue_reducer";
+import SetInstructorPasscodeReducer from "./set_instructor_passcode_reducer";
+import SetPlayerRoleReducer from "./set_player_role_reducer";
 import SetUsernameReducer from "./set_username_reducer";
+import StartNewRoundReducer from "./start_new_round_reducer";
+import TriggerEndRoundReducer from "./trigger_end_round_reducer";
 
 // Import all procedure arg schemas
 
 // Import all table schema definitions
 import ClueRow from "./clue_table";
+import GameStateRow from "./game_state_table";
+import LeaderboardRow from "./leaderboard_table";
 import LobbyRow from "./lobby_table";
 import LobbyParticipantRow from "./lobby_participant_table";
 import MarketRow from "./market_table";
@@ -79,6 +89,17 @@ const tablesSchema = __schema({
       { name: 'clue_clue_id_key', constraint: 'unique', columns: ['clueId'] },
     ],
   }, ClueRow),
+  gameState: __table({
+    name: 'game_state',
+    indexes: [
+      { accessor: 'id', name: 'game_state_id_idx_btree', algorithm: 'btree', columns: [
+        'id',
+      ] },
+    ],
+    constraints: [
+      { name: 'game_state_id_key', constraint: 'unique', columns: ['id'] },
+    ],
+  }, GameStateRow),
   lobby: __table({
     name: 'lobby',
     indexes: [
@@ -180,16 +201,27 @@ const tablesSchema = __schema({
       { name: 'trade_trade_id_key', constraint: 'unique', columns: ['tradeId'] },
     ],
   }, TradeRow),
+  leaderboard: __table({
+    name: 'leaderboard',
+    indexes: [
+    ],
+    constraints: [
+    ],
+  }, LeaderboardRow),
 });
 
 /** The schema information for all reducers in this module. This is defined the same way as the reducers would have been defined in the server, except the body of the reducer is omitted in code generation. */
 const reducersSchema = __reducers(
   __reducerSchema("bot_replenish", BotReplenishReducer),
+  __reducerSchema("broadcast_alert", BroadcastAlertReducer),
   __reducerSchema("cancel_order", CancelOrderReducer),
+  __reducerSchema("claim_instructor", ClaimInstructorReducer),
   __reducerSchema("clear_clues", ClearCluesReducer),
   __reducerSchema("create_lobby", CreateLobbyReducer),
   __reducerSchema("create_market", CreateMarketReducer),
+  __reducerSchema("join_game", JoinGameReducer),
   __reducerSchema("join_lobby", JoinLobbyReducer),
+  __reducerSchema("modify_market", ModifyMarketReducer),
   __reducerSchema("move_player", MovePlayerReducer),
   __reducerSchema("optimal_bot_tick", OptimalBotTickReducer),
   __reducerSchema("place_order", PlaceOrderReducer),
@@ -197,7 +229,11 @@ const reducersSchema = __reducers(
   __reducerSchema("reset_market", ResetMarketReducer),
   __reducerSchema("resolve_market", ResolveMarketReducer),
   __reducerSchema("reveal_clue", RevealClueReducer),
+  __reducerSchema("set_instructor_passcode", SetInstructorPasscodeReducer),
+  __reducerSchema("set_player_role", SetPlayerRoleReducer),
   __reducerSchema("set_username", SetUsernameReducer),
+  __reducerSchema("start_new_round", StartNewRoundReducer),
+  __reducerSchema("trigger_end_round", TriggerEndRoundReducer),
 );
 
 /** The schema information for all procedures in this module. This is defined the same way as the procedures would have been defined in the server. */

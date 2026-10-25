@@ -22,4 +22,7 @@ export default __t.row({
   fairPrice: __t.u32().name("fair_price"),
   volume: __t.u64(),
   createdAt: __t.timestamp().name("created_at"),
+  locationX: __t.i32().name("location_x"),
+  locationY: __t.i32().name("location_y"),
+  revision: __t.u32(),
 });

@@ -10,7 +10,8 @@ interface LobbyModalProps {
   allLobbies: readonly Lobby[];
   markets: readonly Market[];
   onSelectLobby: (lobby: Lobby) => void;
-  onCreateLobby: (code: string, title: string, marketId: bigint, initialBalanceDollars: number) => Promise<void> | void;
+  /** Lobby creation is instructor-only; omit to hide the Create tab. */
+  onCreateLobby?: (code: string, title: string, marketId: bigint, initialBalanceDollars: number) => Promise<void> | void;
 }
 
 const inputCls = 'panel-inset w-full px-3 py-2.5 text-[10px] outline-none focus:bg-white';
@@ -65,6 +66,7 @@ export function LobbyModal({
       setErrorMsg('Pick a market contract');
       return;
     }
+    if (!onCreateLobby) return;
 
     try {
       setIsSubmitting(true);
@@ -86,7 +88,7 @@ export function LobbyModal({
 
   const tabs: [typeof activeTab, string][] = [
     ['qr', 'Invite'],
-    ['create', 'Create'],
+    ...(onCreateLobby ? [['create', 'Create'] as [typeof activeTab, string]] : []),
     ['list', `Rooms (${allLobbies.length})`],
   ];
 

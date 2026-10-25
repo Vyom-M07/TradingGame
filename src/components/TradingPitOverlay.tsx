@@ -81,7 +81,8 @@ export function TradingPitOverlay({
     let maxVol = 1;
 
     for (const o of marketOrders) {
-      const isMine = o.owner.toHexString() === myIdentityHex;
+      // Only this client's own human orders; market-maker liquidity is never "yours".
+      const isMine = !o.isBot && !!myIdentityHex && o.owner.toHexString() === myIdentityHex;
       const isYes = o.side === 'YES';
       if (!isYes && o.side !== 'NO') continue;
       const map = isYes ? bidsMap : asksMap;
@@ -142,7 +143,7 @@ export function TradingPitOverlay({
       // Backend expects the price in the chosen side's denomination.
       const submitPrice = side === 'YES' ? price : 100 - price;
       await onPlaceOrder(side, submitPrice, quantity);
-      setFeedbackMsg({ text: `ORDER IN: ${quantity}x ${side} @ ${price}¢`, type: 'success' });
+      setFeedbackMsg({ text: `${side === 'YES' ? 'BID' : 'ASK'} IN: ${quantity} @ ${price}¢`, type: 'success' });
       setTimeout(() => setFeedbackMsg(null), 3000);
     } catch (err: any) {
       setFeedbackMsg({ text: err?.message || 'Order failed', type: 'error' });
@@ -309,7 +310,7 @@ export function TradingPitOverlay({
                     side === 'YES' ? 'border-emerald-300 bg-emerald-500 text-ink' : 'border-slate-600 text-slate-400 hover:text-white'
                   }`}
                 >
-                  BUY YES
+                  BID
                 </button>
                 <button
                   type="button"
@@ -318,13 +319,13 @@ export function TradingPitOverlay({
                     side === 'NO' ? 'border-rose-300 bg-rose-500 text-ink' : 'border-slate-600 text-slate-400 hover:text-white'
                   }`}
                 >
-                  BUY NO
+                  ASK
                 </button>
               </div>
 
               <div>
                 <div className="mb-2 flex items-center justify-between text-[8px]">
-                  <span className="text-slate-400">LIMIT (YES ¢)</span>
+                  <span className="text-slate-400">LIMIT PRICE</span>
                   <span className="text-[14px] text-yellow-400">{price}¢</span>
                 </div>
                 <div className="flex items-center gap-2">
@@ -415,7 +416,7 @@ export function TradingPitOverlay({
                   side === 'YES' ? '!bg-emerald-400' : '!bg-rose-400'
                 }`}
               >
-                {isSubmitting ? 'MATCHING...' : `BUY ${quantity} ${side}`}
+                {isSubmitting ? 'MATCHING...' : `${side === 'YES' ? 'BID' : 'ASK'} ${quantity} @ ${price}¢`}
               </button>
             </div>
           </div>

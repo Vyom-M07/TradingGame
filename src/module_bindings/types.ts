@@ -10,6 +10,12 @@ import {
   type Infer as __Infer,
 } from "spacetimedb";
 
+export const ActiveConnection = __t.object("ActiveConnection", {
+  connectionId: __t.connectionId(),
+  identity: __t.identity(),
+});
+export type ActiveConnection = __Infer<typeof ActiveConnection>;
+
 export const Clue = __t.object("Clue", {
   clueId: __t.u64(),
   marketId: __t.u64(),
@@ -19,6 +25,39 @@ export const Clue = __t.object("Clue", {
   revealedAt: __t.timestamp(),
 });
 export type Clue = __Infer<typeof Clue>;
+
+export const DisconnectTimer = __t.object("DisconnectTimer", {
+  scheduledId: __t.u64(),
+  scheduledAt: __t.scheduleAt(),
+  identity: __t.identity(),
+});
+export type DisconnectTimer = __Infer<typeof DisconnectTimer>;
+
+export const GameState = __t.object("GameState", {
+  id: __t.u32(),
+  newsTickerMessage: __t.string(),
+  newsPostedAt: __t.timestamp(),
+  isLeaderboardRevealed: __t.bool(),
+});
+export type GameState = __Infer<typeof GameState>;
+
+export const InstructorConfig = __t.object("InstructorConfig", {
+  id: __t.u32(),
+  passcode: __t.string(),
+});
+export type InstructorConfig = __Infer<typeof InstructorConfig>;
+
+export const Leaderboard = __t.object("Leaderboard", {});
+export type Leaderboard = __Infer<typeof Leaderboard>;
+
+export const LeaderboardEntry = __t.object("LeaderboardEntry", {
+  identity: __t.identity(),
+  username: __t.string(),
+  cashCents: __t.u64(),
+  holdingsCents: __t.u64(),
+  netWorthCents: __t.u64(),
+});
+export type LeaderboardEntry = __Infer<typeof LeaderboardEntry>;
 
 export const Lobby = __t.object("Lobby", {
   lobbyId: __t.u64(),
@@ -51,6 +90,9 @@ export const Market = __t.object("Market", {
   fairPrice: __t.u32(),
   volume: __t.u64(),
   createdAt: __t.timestamp(),
+  locationX: __t.i32(),
+  locationY: __t.i32(),
+  revision: __t.u32(),
 });
 export type Market = __Infer<typeof Market>;
 
@@ -76,6 +118,9 @@ export const Player = __t.object("Player", {
   y: __t.i32(),
   direction: __t.string(),
   createdAt: __t.timestamp(),
+  role: __t.string(),
+  avatarType: __t.string(),
+  onFloor: __t.bool(),
 });
 export type Player = __Infer<typeof Player>;
 

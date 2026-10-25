@@ -12,5 +12,5 @@ import {
 
 export default {
   marketId: __t.u64(),
-  winningSide: __t.string(),
+  outcome: __t.string(),
 };

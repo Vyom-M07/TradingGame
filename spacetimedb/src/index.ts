@@ -1,4 +1,13 @@
-import { schema, table, t, SenderError, type InferSchema, type ReducerCtx } from 'spacetimedb/server';
+import {
+  schema,
+  table,
+  t,
+  SenderError,
+  type InferSchema,
+  type ReducerCtx,
+  type ViewCtx,
+} from 'spacetimedb/server';
+import { Identity, ScheduleAt } from 'spacetimedb';
 
 // -----------------------------------------------------------------------------
 // TABLES
@@ -14,6 +23,10 @@ const player = table(
     y: t.i32(), // tile grid y (0 to 10)
     direction: t.string(), // "up" | "down" | "left" | "right"
     createdAt: t.timestamp(),
+    role: t.string().default('STUDENT'), // "STUDENT" | "INSTRUCTOR"
+    avatarType: t.string().default('trader'), // "trader" | "businesswoman"
+    // False until join_game, and again after being disconnected for 2 minutes.
+    onFloor: t.bool().default(false),
   }
 );
 
@@ -31,6 +44,11 @@ const market = table(
     fairPrice: t.u32(), // 1 - 99 cents (underlying consensus fair value)
     volume: t.u64(), // total contracts matched
     createdAt: t.timestamp(),
+    // Top-left tile of the market's 2x2 trading pit on the floor grid; -1 = not placed.
+    locationX: t.i32().default(-1),
+    locationY: t.i32().default(-1),
+    // Bumped whenever the contract's terms change, so agents know to re-price.
+    revision: t.u32().default(0),
   }
 );
 
@@ -125,6 +143,45 @@ const lobbyParticipant = table(
   }
 );
 
+// Singleton (id = 0) of round-wide state every client reacts to.
+const gameState = table(
+  { name: 'game_state', public: true },
+  {
+    id: t.u32().primaryKey(),
+    newsTickerMessage: t.string(),
+    newsPostedAt: t.timestamp(), // bumps on every broadcast so repeats still flash
+    isLeaderboardRevealed: t.bool(),
+  }
+);
+
+// Private: live connections, so a player with another tab open stays on the floor.
+const activeConnection = table(
+  { name: 'active_connection' },
+  {
+    connectionId: t.connectionId().primaryKey(),
+    identity: t.identity().index('btree'),
+  }
+);
+
+// Private: fires 2 minutes after a player's last connection drops.
+const disconnectTimer = table(
+  { name: 'disconnect_timer' },
+  {
+    scheduledId: t.u64().primaryKey().autoInc(),
+    scheduledAt: t.scheduleAt(),
+    identity: t.identity().index('btree'),
+  }
+);
+
+// Private: holds the passcode used to claim the instructor role.
+const instructorConfig = table(
+  { name: 'instructor_config' },
+  {
+    id: t.u32().primaryKey(),
+    passcode: t.string(),
+  }
+);
+
 // -----------------------------------------------------------------------------
 // SCHEMA
 // -----------------------------------------------------------------------------
@@ -138,11 +195,28 @@ const spacetimedb = schema({
   clue,
   lobby,
   lobbyParticipant,
+  gameState,
+  instructorConfig,
+  activeConnection,
+  disconnectTimer,
 });
 
 export default spacetimedb;
 
 type Ctx = ReducerCtx<InferSchema<typeof spacetimedb>>;
+// Read-only database handle shared by views and reducers.
+type ReadDb = ViewCtx<InferSchema<typeof spacetimedb>>['db'];
+
+const DEFAULT_INSTRUCTOR_PASSCODE = 'CALHACKS13';
+
+const AVATAR_TYPES = ['trader', 'businesswoman'];
+const SPAWN = { x: 3, y: 5 };
+const DISCONNECT_GRACE_MICROS = 120_000_000n; // 2 minutes
+
+// Floor grid (must match the client) and the central pit's walk-up zone.
+const GRID_COLS = 20;
+const GRID_ROWS = 11;
+const CENTRAL_PIT_ZONE = { minX: 7, maxX: 12, minY: 3, maxY: 8 };
 
 // -----------------------------------------------------------------------------
 // HELPER FUNCTIONS
@@ -159,9 +233,113 @@ function getOrCreatePlayer(ctx: Ctx) {
       y: 5,
       direction: 'right',
       createdAt: ctx.timestamp,
+      role: 'STUDENT',
+      avatarType: 'trader',
+      onFloor: false,
     });
   }
   return p;
+}
+
+/** Validates a display name and rejects one already used by another player (case-insensitive). */
+function assertUniqueName(ctx: Ctx, name: string) {
+  const trimmed = name.trim();
+  if (trimmed.length < 2 || trimmed.length > 24) {
+    throw new SenderError('Name must be between 2 and 24 characters');
+  }
+  const lower = trimmed.toLowerCase();
+  for (const other of ctx.db.player.iter()) {
+    if (!other.identity.equals(ctx.sender) && other.username.toLowerCase() === lower) {
+      throw new SenderError(`The name "${trimmed}" is already taken`);
+    }
+  }
+  return trimmed;
+}
+
+function cancelDisconnectTimers(ctx: Ctx, identity: Identity) {
+  for (const timer of [...ctx.db.disconnectTimer.identity.filter(identity)]) {
+    ctx.db.disconnectTimer.scheduledId.delete(timer.scheduledId);
+  }
+}
+
+function requireInstructor(ctx: Ctx) {
+  const p = ctx.db.player.identity.find(ctx.sender);
+  if (!p || p.role !== 'INSTRUCTOR') {
+    throw new SenderError('Forbidden: instructor role required');
+  }
+  return p;
+}
+
+function getGameState(ctx: Ctx) {
+  return (
+    ctx.db.gameState.id.find(0) ??
+    ctx.db.gameState.insert({
+      id: 0,
+      newsTickerMessage: '',
+      newsPostedAt: ctx.timestamp,
+      isLeaderboardRevealed: false,
+    })
+  );
+}
+
+/** Mid-price of a market's book in YES cents, falling back to the last trade. */
+function midPrice(db: ReadDb, marketId: bigint): number {
+  const m = db.market.marketId.find(marketId);
+  if (!m) return 0;
+  if (m.status === 'RESOLVED') return m.winningSide === 'YES' ? 100 : 0;
+  let bestBid = 0;
+  let bestAsk = 100;
+  for (const o of db.order.marketId.filter(marketId)) {
+    if (o.quantity === 0) continue;
+    if (o.side === 'YES') bestBid = Math.max(bestBid, o.price);
+    else bestAsk = Math.min(bestAsk, 100 - o.price);
+  }
+  if (bestBid > 0 && bestAsk < 100) return Math.round((bestBid + bestAsk) / 2);
+  return m.lastTradedPrice;
+}
+
+/**
+ * Total Net Worth = cash_balance + cash locked in resting orders
+ *                 + open positions marked at the current mid-price.
+ */
+function valuePlayer(db: ReadDb, owner: Identity, cashBalance: bigint) {
+  let escrow = 0n;
+  for (const o of db.order.owner.filter(owner)) {
+    if (!o.isBot) escrow += BigInt(o.price) * BigInt(o.quantity);
+  }
+  let holdings = 0n;
+  const mids = new Map<bigint, number>();
+  for (const pos of db.position.by_owner_market.filter(owner)) {
+    if (pos.yesShares === 0 && pos.noShares === 0) continue;
+    let mid = mids.get(pos.marketId);
+    if (mid === undefined) {
+      mid = midPrice(db, pos.marketId);
+      mids.set(pos.marketId, mid);
+    }
+    holdings += BigInt(pos.yesShares) * BigInt(mid) + BigInt(pos.noShares) * BigInt(100 - mid);
+  }
+  const cash = cashBalance + escrow;
+  return { cash, holdings, netWorth: cash + holdings };
+}
+
+/** Throws unless a 2x2 pit with top-left (x, y) fits on open floor. */
+function assertPitLocation(ctx: Ctx, x: number, y: number) {
+  // Row 0 holds the desks and the bottom row the corner plants.
+  if (x < 0 || x > GRID_COLS - 2 || y < 1 || y > GRID_ROWS - 3) {
+    throw new SenderError(`Pit location must be x 0-${GRID_COLS - 2}, y 1-${GRID_ROWS - 3}`);
+  }
+  const overlaps = (ax: number, ay: number, bx0: number, bx1: number, by0: number, by1: number) =>
+    ax + 1 >= bx0 && ax <= bx1 && ay + 1 >= by0 && ay <= by1;
+  const z = CENTRAL_PIT_ZONE;
+  if (overlaps(x, y, z.minX, z.maxX, z.minY, z.maxY)) {
+    throw new SenderError('That spot overlaps the central trading pit');
+  }
+  for (const m of ctx.db.market.iter()) {
+    if (m.status !== 'OPEN' || m.locationX < 0) continue;
+    if (overlaps(x, y, m.locationX - 1, m.locationX + 2, m.locationY - 1, m.locationY + 2)) {
+      throw new SenderError(`That spot is too close to the pit for "${m.question}"`);
+    }
+  }
 }
 
 function getOrCreatePosition(ctx: Ctx, marketId: bigint, owner: any) {
@@ -178,24 +356,14 @@ function getOrCreatePosition(ctx: Ctx, marketId: bigint, owner: any) {
   });
 }
 
-function assertInstructor(ctx: Ctx, marketId: bigint) {
-  const lobbies = [...ctx.db.lobby.marketId.filter(marketId)];
-  if (lobbies.length > 0) {
-    const isInstructor = lobbies.some(l => {
-      const isSystem = l.instructor.toHexString().replace(/0/g, '') === '';
-      return l.instructor.equals(ctx.sender) || isSystem;
-    });
-    if (!isInstructor) {
-      throw new SenderError('Forbidden: Only the lobby instructor can perform this action');
-    }
-  }
-}
 
 function seedMarketLiquidity(ctx: Ctx, marketId: bigint, fairPrice: number) {
   // Clear existing AMM bot orders for this market
   const existingOrders = [...ctx.db.order.marketId.filter(marketId)];
+  // Bot orders carry no escrow, so they are simply replaced (including any
+  // leftovers from before bots had their own identity).
   for (const o of existingOrders) {
-    if (o.isBot && o.botRole === 'AMM') {
+    if (o.isBot) {
       ctx.db.order.orderId.delete(o.orderId);
     }
   }
@@ -215,7 +383,7 @@ function seedMarketLiquidity(ctx: Ctx, marketId: bigint, fairPrice: number) {
       ctx.db.order.insert({
         orderId: 0n,
         marketId,
-        owner: ctx.sender,
+        owner: ctx.identity, // the module itself is the market maker
         side: 'YES',
         price: p,
         quantity: item.qty,
@@ -243,7 +411,7 @@ function seedMarketLiquidity(ctx: Ctx, marketId: bigint, fairPrice: number) {
       ctx.db.order.insert({
         orderId: 0n,
         marketId,
-        owner: ctx.sender,
+        owner: ctx.identity,
         side: 'NO',
         price: noBid,
         quantity: item.qty,
@@ -261,6 +429,9 @@ function seedMarketLiquidity(ctx: Ctx, marketId: bigint, fairPrice: number) {
 // -----------------------------------------------------------------------------
 
 export const init = spacetimedb.init(ctx => {
+  getGameState(ctx);
+  ctx.db.instructorConfig.insert({ id: 0, passcode: DEFAULT_INSTRUCTOR_PASSCODE });
+
   // 1. Classroom / Educational Market: 3-Card Sum Game
   const mEdu = ctx.db.market.insert({
     marketId: 0n,
@@ -274,6 +445,9 @@ export const init = spacetimedb.init(ctx => {
     fairPrice: 50,
     volume: 500n,
     createdAt: ctx.timestamp,
+    locationX: -1,
+    locationY: -1,
+    revision: 0,
   });
   seedMarketLiquidity(ctx, mEdu.marketId, 50);
 
@@ -301,6 +475,9 @@ export const init = spacetimedb.init(ctx => {
     fairPrice: 62,
     volume: 1250n,
     createdAt: ctx.timestamp,
+    locationX: -1,
+    locationY: -1,
+    revision: 0,
   });
   seedMarketLiquidity(ctx, m1.marketId, 62);
 
@@ -316,6 +493,9 @@ export const init = spacetimedb.init(ctx => {
     fairPrice: 84,
     volume: 3840n,
     createdAt: ctx.timestamp,
+    locationX: -1,
+    locationY: -1,
+    revision: 0,
   });
   seedMarketLiquidity(ctx, m2.marketId, 84);
 
@@ -331,6 +511,9 @@ export const init = spacetimedb.init(ctx => {
     fairPrice: 75,
     volume: 890n,
     createdAt: ctx.timestamp,
+    locationX: -1,
+    locationY: -1,
+    revision: 0,
   });
   seedMarketLiquidity(ctx, m3.marketId, 75);
 
@@ -346,27 +529,79 @@ export const init = spacetimedb.init(ctx => {
     fairPrice: 41,
     volume: 2150n,
     createdAt: ctx.timestamp,
+    locationX: -1,
+    locationY: -1,
+    revision: 0,
   });
   seedMarketLiquidity(ctx, m4.marketId, 41);
 });
 
 export const onConnect = spacetimedb.clientConnected(ctx => {
   getOrCreatePlayer(ctx);
+  if (ctx.connectionId) {
+    ctx.db.activeConnection.insert({ connectionId: ctx.connectionId, identity: ctx.sender });
+  }
+  // Back within the grace period: keep the avatar where it was.
+  cancelDisconnectTimers(ctx, ctx.sender);
 });
 
-export const onDisconnect = spacetimedb.clientDisconnected(_ctx => {});
+export const onDisconnect = spacetimedb.clientDisconnected(ctx => {
+  if (ctx.connectionId) ctx.db.activeConnection.connectionId.delete(ctx.connectionId);
+  // Another tab is still open for this identity.
+  if ([...ctx.db.activeConnection.identity.filter(ctx.sender)].length > 0) return;
+
+  cancelDisconnectTimers(ctx, ctx.sender);
+  ctx.db.disconnectTimer.insert({
+    scheduledId: 0n,
+    scheduledAt: ScheduleAt.time(ctx.timestamp.microsSinceUnixEpoch + DISCONNECT_GRACE_MICROS),
+    identity: ctx.sender,
+  });
+});
+
+/**
+ * Grace period expired: take the avatar off the map. Resting orders, cash and
+ * positions are untouched so their liquidity stays in the market.
+ */
+export const removeIdleAvatar = spacetimedb.reducer(
+  { onSchedule: disconnectTimer },
+  { timer: disconnectTimer.rowType },
+  (ctx, { timer }) => {
+    if (!ctx.sender.equals(ctx.identity)) throw new SenderError('Scheduler only');
+    if ([...ctx.db.activeConnection.identity.filter(timer.identity)].length > 0) return;
+    const p = ctx.db.player.identity.find(timer.identity);
+    if (p && p.onFloor) ctx.db.player.identity.update({ ...p, onFloor: false });
+  }
+);
 
 // -----------------------------------------------------------------------------
 // REDUCERS
 // -----------------------------------------------------------------------------
 
+/** Login: claim a unique name, pick an avatar and step onto the floor. */
+export const joinGame = spacetimedb.reducer(
+  { name: t.string(), avatarType: t.string() },
+  (ctx, { name, avatarType }) => {
+    const username = assertUniqueName(ctx, name);
+    if (!AVATAR_TYPES.includes(avatarType)) throw new SenderError('Unknown avatar');
+    const p = getOrCreatePlayer(ctx);
+    cancelDisconnectTimers(ctx, ctx.sender);
+    ctx.db.player.identity.update({
+      ...p,
+      username,
+      avatarType,
+      onFloor: true,
+      // Players returning after being cleared from the map start at the door.
+      x: p.onFloor ? p.x : SPAWN.x,
+      y: p.onFloor ? p.y : SPAWN.y,
+      direction: p.onFloor ? p.direction : 'down',
+    });
+  }
+);
+
 export const setUsername = spacetimedb.reducer(
   { username: t.string() },
   (ctx, { username }) => {
-    const trimmed = username.trim();
-    if (trimmed.length < 2 || trimmed.length > 24) {
-      throw new SenderError('Username must be between 2 and 24 characters');
-    }
+    const trimmed = assertUniqueName(ctx, username);
     const p = getOrCreatePlayer(ctx);
     ctx.db.player.identity.update({ ...p, username: trimmed });
   }
@@ -394,17 +629,27 @@ export const movePlayer = spacetimedb.reducer(
   }
 );
 
+/**
+ * Deploy a new contract with its own trading pit on the floor (Instructor only).
+ * Pass locationX = locationY = -1 to create a market without a floor pit.
+ */
 export const createMarket = spacetimedb.reducer(
   {
     question: t.string(),
     category: t.string(),
     description: t.string(),
     initialPrice: t.u32(),
+    locationX: t.i32(),
+    locationY: t.i32(),
   },
-  (ctx, { question, category, description, initialPrice }) => {
+  (ctx, { question, category, description, initialPrice, locationX, locationY }) => {
+    requireInstructor(ctx);
+    if (!question.trim()) throw new SenderError('Question is required');
     if (initialPrice < 1 || initialPrice > 99) {
       throw new SenderError('Initial price must be between 1 and 99 cents');
     }
+    const placed = locationX >= 0 || locationY >= 0;
+    if (placed) assertPitLocation(ctx, locationX, locationY);
     const m = ctx.db.market.insert({
       marketId: 0n,
       question: question.trim(),
@@ -417,6 +662,9 @@ export const createMarket = spacetimedb.reducer(
       fairPrice: initialPrice,
       volume: 0n,
       createdAt: ctx.timestamp,
+      locationX: placed ? locationX : -1,
+      locationY: placed ? locationY : -1,
+      revision: 0,
     });
     seedMarketLiquidity(ctx, m.marketId, initialPrice);
   }
@@ -433,6 +681,7 @@ export const createLobby = spacetimedb.reducer(
     initialBalance: t.u64(), // starting balance in cents (e.g. 10_000n = $100.00)
   },
   (ctx, { code, title, marketId, initialBalance }) => {
+    requireInstructor(ctx);
     const cleanCode = code.trim().toUpperCase();
     if (cleanCode.length < 3 || cleanCode.length > 16) {
       throw new SenderError('Lobby code must be between 3 and 16 characters');
@@ -505,11 +754,16 @@ export const joinLobby = spacetimedb.reducer(
 
     const existing = [...ctx.db.lobbyParticipant.by_lobby_player.filter([l.lobbyId, ctx.sender])];
     if (existing.length === 0) {
-      const startingCents = l.initialBalance > 0n ? l.initialBalance : 10_000n;
-      ctx.db.player.identity.update({
-        ...p,
-        cashBalance: startingCents,
-      });
+      // Starting cash is granted once per player, not per lobby, so hopping to
+      // a new lobby can't refill a spent bankroll.
+      const joinedBefore = [...ctx.db.lobbyParticipant.iter()].some(part => part.player.equals(ctx.sender));
+      if (!joinedBefore) {
+        const startingCents = l.initialBalance > 0n ? l.initialBalance : 10_000n;
+        ctx.db.player.identity.update({
+          ...p,
+          cashBalance: startingCents,
+        });
+      }
 
       ctx.db.lobbyParticipant.insert({
         participantId: 0n,
@@ -530,20 +784,20 @@ export const resetLobbyBalances = spacetimedb.reducer(
     const cleanCode = code.trim().toUpperCase();
     const l = ctx.db.lobby.code.find(cleanCode);
     if (!l) throw new SenderError(`Lobby '${cleanCode}' not found`);
-    if (!l.instructor.equals(ctx.sender)) {
-      throw new SenderError('Forbidden: Only the lobby instructor can reset balances');
-    }
+    requireInstructor(ctx);
 
+    // Fresh start: starting cash, no positions, no resting orders.
     const startingCents = l.initialBalance > 0n ? l.initialBalance : 10_000n;
     for (const part of ctx.db.lobbyParticipant.iter()) {
-      if (part.lobbyId === l.lobbyId) {
-        const playerRec = ctx.db.player.identity.find(part.player);
-        if (playerRec) {
-          ctx.db.player.identity.update({
-            ...playerRec,
-            cashBalance: startingCents,
-          });
-        }
+      if (part.lobbyId !== l.lobbyId) continue;
+      const playerRec = ctx.db.player.identity.find(part.player);
+      if (!playerRec || playerRec.role === 'INSTRUCTOR') continue;
+      ctx.db.player.identity.update({ ...playerRec, cashBalance: startingCents });
+      for (const pos of [...ctx.db.position.by_owner_market.filter(part.player)]) {
+        ctx.db.position.positionId.update({ ...pos, yesShares: 0, noShares: 0 });
+      }
+      for (const o of [...ctx.db.order.owner.filter(part.player)]) {
+        if (!o.isBot) ctx.db.order.orderId.delete(o.orderId);
       }
     }
   }
@@ -560,7 +814,7 @@ export const revealClue = spacetimedb.reducer(
     newFairPrice: t.u32(),
   },
   (ctx, { marketId, title, content, newFairPrice }) => {
-    assertInstructor(ctx, marketId);
+    requireInstructor(ctx);
     const m = ctx.db.market.marketId.find(marketId);
     if (!m) throw new SenderError('Market not found');
 
@@ -590,7 +844,7 @@ export const revealClue = spacetimedb.reducer(
 export const clearClues = spacetimedb.reducer(
   { marketId: t.u64() },
   (ctx, { marketId }) => {
-    assertInstructor(ctx, marketId);
+    requireInstructor(ctx);
     for (const c of ctx.db.clue.marketId.filter(marketId)) {
       ctx.db.clue.clueId.delete(c.clueId);
     }
@@ -833,6 +1087,9 @@ export const placeOrder = spacetimedb.reducer(
     const m = ctx.db.market.marketId.find(marketId);
     if (!m) throw new SenderError('Market not found');
     if (m.status !== 'OPEN') throw new SenderError('Market is resolved; orders cannot be placed');
+    if (getGameState(ctx).isLeaderboardRevealed) {
+      throw new SenderError('The round has ended; trading is closed');
+    }
 
     let p = getOrCreatePlayer(ctx);
 
@@ -855,6 +1112,7 @@ export const cancelOrder = spacetimedb.reducer(
   (ctx, { orderId }) => {
     const o = ctx.db.order.orderId.find(orderId);
     if (!o) throw new SenderError('Order not found');
+    if (o.isBot) throw new SenderError('Market-maker orders cannot be cancelled');
     if (!o.owner.equals(ctx.sender)) {
       throw new SenderError('Unauthorized: you do not own this order');
     }
@@ -877,11 +1135,11 @@ export const cancelOrder = spacetimedb.reducer(
 export const resolveMarket = spacetimedb.reducer(
   {
     marketId: t.u64(),
-    winningSide: t.string(), // "YES" or "NO"
+    outcome: t.string(), // "YES" or "NO"
   },
-  (ctx, { marketId, winningSide }) => {
-    assertInstructor(ctx, marketId);
-    const norm = winningSide.toUpperCase();
+  (ctx, { marketId, outcome }) => {
+    requireInstructor(ctx);
+    const norm = outcome.toUpperCase();
     if (norm !== 'YES' && norm !== 'NO') {
       throw new SenderError("Winning side must be 'YES' or 'NO'");
     }
@@ -945,6 +1203,52 @@ export const resolveMarket = spacetimedb.reducer(
 );
 
 /**
+ * Change a live contract's wording (Instructor only). Because the terms
+ * change, every resting order on it is cancelled first: human orders are
+ * refunded their escrow; market-maker orders hold no cash and are dropped.
+ */
+export const modifyMarket = spacetimedb.reducer(
+  {
+    marketId: t.u64(),
+    newQuestion: t.string(),
+    newCategory: t.string(),
+  },
+  (ctx, { marketId, newQuestion, newCategory }) => {
+    requireInstructor(ctx);
+    const m = ctx.db.market.marketId.find(marketId);
+    if (!m) throw new SenderError('Market not found');
+    if (m.status !== 'OPEN') throw new SenderError('Resolved markets cannot be edited');
+    const question = newQuestion.trim();
+    if (!question) throw new SenderError('Question is required');
+    if (question.length > 200) throw new SenderError('Question is limited to 200 characters');
+
+    // 1. Wipe the book, refunding escrow to each human owner.
+    const refunds = new Map<string, { owner: Identity; cents: bigint }>();
+    for (const o of [...ctx.db.order.marketId.filter(marketId)]) {
+      if (!o.isBot) {
+        const key = o.owner.toHexString();
+        const entry = refunds.get(key) ?? { owner: o.owner, cents: 0n };
+        entry.cents += BigInt(o.price) * BigInt(o.quantity);
+        refunds.set(key, entry);
+      }
+      ctx.db.order.orderId.delete(o.orderId);
+    }
+    for (const { owner, cents } of refunds.values()) {
+      const p = ctx.db.player.identity.find(owner);
+      if (p) ctx.db.player.identity.update({ ...p, cashBalance: p.cashBalance + cents });
+    }
+
+    // 2. New terms; subscribers (UI, agents) receive the row update.
+    ctx.db.market.marketId.update({
+      ...m,
+      question,
+      category: newCategory.trim() || m.category,
+      revision: m.revision + 1,
+    });
+  }
+);
+
+/**
  * Reset / Undo Market Resolution:
  * Restores the pre-resolved percentage and price!
  */
@@ -954,7 +1258,7 @@ export const resetMarket = spacetimedb.reducer(
     defaultPrice: t.u32(),
   },
   (ctx, { marketId, defaultPrice }) => {
-    assertInstructor(ctx, marketId);
+    requireInstructor(ctx);
     const m = ctx.db.market.marketId.find(marketId);
     if (!m) throw new SenderError('Market not found');
 
@@ -1028,7 +1332,7 @@ export const optimalBotTick = spacetimedb.reducer(
       const matchOrder = marketOrders.find(o => o.side === 'NO' && 100 - o.price === targetAsk);
       if (matchOrder) {
         const tradeQty = Math.min(matchOrder.quantity, 25);
-        executeOrderMatch(ctx, marketId, ctx.sender, 'YES', targetAsk, tradeQty, true, 'SNIPER');
+        executeOrderMatch(ctx, marketId, ctx.identity, 'YES', targetAsk, tradeQty, true, 'SNIPER');
         sniperExecuted = true;
       }
     } else if (bestYesBid > currentFair) {
@@ -1037,7 +1341,7 @@ export const optimalBotTick = spacetimedb.reducer(
       if (matchOrder) {
         const noPrice = 100 - targetBid;
         const tradeQty = Math.min(matchOrder.quantity, 25);
-        executeOrderMatch(ctx, marketId, ctx.sender, 'NO', noPrice, tradeQty, true, 'SNIPER');
+        executeOrderMatch(ctx, marketId, ctx.identity, 'NO', noPrice, tradeQty, true, 'SNIPER');
         sniperExecuted = true;
       }
     }
@@ -1047,5 +1351,120 @@ export const optimalBotTick = spacetimedb.reducer(
     if (currentSpread < 2 || currentSpread > 4 || marketOrders.length < 6 || !sniperExecuted) {
       seedMarketLiquidity(ctx, marketId, currentFair);
     }
+  }
+);
+
+// -----------------------------------------------------------------------------
+// INSTRUCTOR "GOD MODE"
+// -----------------------------------------------------------------------------
+
+/** Become an instructor by presenting the classroom passcode. */
+export const claimInstructor = spacetimedb.reducer(
+  { passcode: t.string() },
+  (ctx, { passcode }) => {
+    const cfg = ctx.db.instructorConfig.id.find(0);
+    const expected = cfg?.passcode ?? DEFAULT_INSTRUCTOR_PASSCODE;
+    if (passcode.trim() !== expected) throw new SenderError('Incorrect instructor passcode');
+    const p = getOrCreatePlayer(ctx);
+    ctx.db.player.identity.update({ ...p, role: 'INSTRUCTOR' });
+  }
+);
+
+export const setInstructorPasscode = spacetimedb.reducer(
+  { passcode: t.string() },
+  (ctx, { passcode }) => {
+    requireInstructor(ctx);
+    const clean = passcode.trim();
+    if (clean.length < 4) throw new SenderError('Passcode must be at least 4 characters');
+    const cfg = ctx.db.instructorConfig.id.find(0);
+    if (cfg) ctx.db.instructorConfig.id.update({ ...cfg, passcode: clean });
+    else ctx.db.instructorConfig.insert({ id: 0, passcode: clean });
+  }
+);
+
+/** Promote or demote another player (Instructor only). */
+export const setPlayerRole = spacetimedb.reducer(
+  { target: t.identity(), role: t.string() },
+  (ctx, { target, role }) => {
+    requireInstructor(ctx);
+    const norm = role.toUpperCase();
+    if (norm !== 'STUDENT' && norm !== 'INSTRUCTOR') {
+      throw new SenderError("Role must be 'STUDENT' or 'INSTRUCTOR'");
+    }
+    const p = ctx.db.player.identity.find(target);
+    if (!p) throw new SenderError('Player not found');
+    ctx.db.player.identity.update({ ...p, role: norm });
+  }
+);
+
+/** Push a breaking-news banner to every client. An empty message clears it. */
+export const broadcastAlert = spacetimedb.reducer(
+  { message: t.string() },
+  (ctx, { message }) => {
+    requireInstructor(ctx);
+    const clean = message.trim();
+    if (clean.length > 200) throw new SenderError('Alerts are limited to 200 characters');
+    const state = getGameState(ctx);
+    ctx.db.gameState.id.update({ ...state, newsTickerMessage: clean, newsPostedAt: ctx.timestamp });
+  }
+);
+
+/** End the round: closes trading and reveals the leaderboard to students. */
+export const triggerEndRound = spacetimedb.reducer(ctx => {
+  requireInstructor(ctx);
+  const state = getGameState(ctx);
+  ctx.db.gameState.id.update({ ...state, isLeaderboardRevealed: true });
+});
+
+/** Hide the leaderboard again and reopen trading for a new round. */
+export const startNewRound = spacetimedb.reducer(ctx => {
+  requireInstructor(ctx);
+  const state = getGameState(ctx);
+  ctx.db.gameState.id.update({
+    ...state,
+    isLeaderboardRevealed: false,
+    newsTickerMessage: '',
+    newsPostedAt: ctx.timestamp,
+  });
+});
+
+// -----------------------------------------------------------------------------
+// LEADERBOARD VIEW
+// -----------------------------------------------------------------------------
+
+const LeaderboardEntry = t.object('LeaderboardEntry', {
+  identity: t.identity(),
+  username: t.string(),
+  cashCents: t.u64(),
+  holdingsCents: t.u64(),
+  netWorthCents: t.u64(),
+});
+
+/**
+ * Students ranked by Total Net Worth. Instructors always see it; students get
+ * an empty list until the instructor ends the round.
+ */
+export const leaderboard = spacetimedb.view(
+  { name: 'leaderboard', public: true },
+  t.array(LeaderboardEntry),
+  ctx => {
+    const viewer = ctx.db.player.identity.find(ctx.sender);
+    const state = ctx.db.gameState.id.find(0);
+    if (viewer?.role !== 'INSTRUCTOR' && !state?.isLeaderboardRevealed) return [];
+
+    const rows = [];
+    for (const p of ctx.db.player.iter()) {
+      if (p.role === 'INSTRUCTOR') continue;
+      const v = valuePlayer(ctx.db, p.identity, p.cashBalance);
+      rows.push({
+        identity: p.identity,
+        username: p.username,
+        cashCents: v.cash,
+        holdingsCents: v.holdings,
+        netWorthCents: v.netWorth,
+      });
+    }
+    rows.sort((a, b) => (a.netWorthCents === b.netWorthCents ? 0 : a.netWorthCents > b.netWorthCents ? -1 : 1));
+    return rows;
   }
 );

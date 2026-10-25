@@ -7,11 +7,15 @@ import { type Infer as __Infer } from "spacetimedb";
 
 // Import all reducer arg schemas
 import BotReplenishReducer from "../bot_replenish_reducer";
+import BroadcastAlertReducer from "../broadcast_alert_reducer";
 import CancelOrderReducer from "../cancel_order_reducer";
+import ClaimInstructorReducer from "../claim_instructor_reducer";
 import ClearCluesReducer from "../clear_clues_reducer";
 import CreateLobbyReducer from "../create_lobby_reducer";
 import CreateMarketReducer from "../create_market_reducer";
+import JoinGameReducer from "../join_game_reducer";
 import JoinLobbyReducer from "../join_lobby_reducer";
+import ModifyMarketReducer from "../modify_market_reducer";
 import MovePlayerReducer from "../move_player_reducer";
 import OptimalBotTickReducer from "../optimal_bot_tick_reducer";
 import PlaceOrderReducer from "../place_order_reducer";
@@ -19,14 +23,22 @@ import ResetLobbyBalancesReducer from "../reset_lobby_balances_reducer";
 import ResetMarketReducer from "../reset_market_reducer";
 import ResolveMarketReducer from "../resolve_market_reducer";
 import RevealClueReducer from "../reveal_clue_reducer";
+import SetInstructorPasscodeReducer from "../set_instructor_passcode_reducer";
+import SetPlayerRoleReducer from "../set_player_role_reducer";
 import SetUsernameReducer from "../set_username_reducer";
+import StartNewRoundReducer from "../start_new_round_reducer";
+import TriggerEndRoundReducer from "../trigger_end_round_reducer";
 
 export type BotReplenishParams = __Infer<typeof BotReplenishReducer>;
+export type BroadcastAlertParams = __Infer<typeof BroadcastAlertReducer>;
 export type CancelOrderParams = __Infer<typeof CancelOrderReducer>;
+export type ClaimInstructorParams = __Infer<typeof ClaimInstructorReducer>;
 export type ClearCluesParams = __Infer<typeof ClearCluesReducer>;
 export type CreateLobbyParams = __Infer<typeof CreateLobbyReducer>;
 export type CreateMarketParams = __Infer<typeof CreateMarketReducer>;
+export type JoinGameParams = __Infer<typeof JoinGameReducer>;
 export type JoinLobbyParams = __Infer<typeof JoinLobbyReducer>;
+export type ModifyMarketParams = __Infer<typeof ModifyMarketReducer>;
 export type MovePlayerParams = __Infer<typeof MovePlayerReducer>;
 export type OptimalBotTickParams = __Infer<typeof OptimalBotTickReducer>;
 export type PlaceOrderParams = __Infer<typeof PlaceOrderReducer>;
@@ -34,5 +46,9 @@ export type ResetLobbyBalancesParams = __Infer<typeof ResetLobbyBalancesReducer>
 export type ResetMarketParams = __Infer<typeof ResetMarketReducer>;
 export type ResolveMarketParams = __Infer<typeof ResolveMarketReducer>;
 export type RevealClueParams = __Infer<typeof RevealClueReducer>;
+export type SetInstructorPasscodeParams = __Infer<typeof SetInstructorPasscodeReducer>;
+export type SetPlayerRoleParams = __Infer<typeof SetPlayerRoleReducer>;
 export type SetUsernameParams = __Infer<typeof SetUsernameReducer>;
+export type StartNewRoundParams = __Infer<typeof StartNewRoundReducer>;
+export type TriggerEndRoundParams = __Infer<typeof TriggerEndRoundReducer>;
 

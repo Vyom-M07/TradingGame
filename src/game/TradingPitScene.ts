@@ -2,10 +2,13 @@ import * as Phaser from 'phaser';
 import {
   AGENT_SPRITES,
   AGENT_STYLE,
+  AVATARS,
+  AVATAR_TYPES,
   FACINGS,
   MINIMAP_RECT,
   facingFor,
   type AgentKind,
+  type AvatarType,
   type Facing,
 } from './assets';
 
@@ -17,18 +20,39 @@ export interface PlayerData {
   y: number; // backend grid y: 0..10
   direction: string;
   kind: AgentKind;
+  avatarType: AvatarType;
 }
+
+/** A market pit spawned on the floor. (x, y) is the top-left of its 2x2 carpet. */
+export interface PitData {
+  id: string;
+  x: number;
+  y: number;
+  title: string;
+  price: number;
+}
+
+/** Id reported for the big pit in the middle of the hall. */
+export const MAIN_PIT = 'main';
 
 export interface TradingPitSceneConfig {
   onPlayerMove?: (x: number, y: number, direction: string) => void;
   onTogglePitOverlay?: (open?: boolean) => void;
-  onProximityChange?: (inPit: boolean) => void;
+  /** Called with the pit the player is standing at (MAIN_PIT or a market id), or null. */
+  onProximityChange?: (pitId: string | null) => void;
   myIdentityHex?: string;
+}
+
+interface Pit {
+  data: PitData;
+  objects: Phaser.GameObjects.GameObject[];
+  label: Phaser.GameObjects.GameObject[];
 }
 
 interface Avatar {
   identityHex: string;
   kind: AgentKind;
+  avatarType: AvatarType;
   body: Phaser.GameObjects.Container;
   sprite: Phaser.GameObjects.Sprite;
   overhead: Phaser.GameObjects.Container;
@@ -70,7 +94,7 @@ const STEP_MS = 170;
 const FONT = '"Press Start 2P", monospace';
 const INK = '#1d1b2a';
 
-const PROPS = ['desk', 'plant', 'post', 'bull', 'lamp', 'bench', 'tree'] as const;
+const PROPS = ['desk', 'plant', 'post', 'bull', 'lamp', 'bench', 'tree', 'booth'] as const;
 type PropKey = (typeof PROPS)[number];
 
 const wx = (bx: number) => (FX + bx) * T + T / 2;
@@ -91,7 +115,10 @@ export class TradingPitScene extends Phaser.Scene {
   private local!: Avatar;
   private localReady = false;
   private isMoving = false;
-  private inPit = false;
+  private currentPit: string | null = null;
+  private pits = new Map<string, Pit>();
+  private baseTicker = '';
+  private alertMessage = '';
   private inputEnabled = true;
 
   private cursors?: Phaser.Types.Input.Keyboard.CursorKeys;
@@ -110,7 +137,7 @@ export class TradingPitScene extends Phaser.Scene {
   private pitHint!: Phaser.GameObjects.Container;
 
   private missing = new Set<string>();
-  private walkAnims = new Set<Facing>();
+  private walkAnims = new Set<string>(); // `${avatar}-${facing}`
 
   constructor() {
     super({ key: 'TradingPitScene' });
@@ -143,10 +170,13 @@ export class TradingPitScene extends Phaser.Scene {
       this.missing.add(file.key);
     });
 
-    for (const dir of FACINGS) {
-      this.load.image(`player-${dir}`, `/assets/player/idle/${dir}.png`);
-      for (let i = 0; i < 4; i++) {
-        this.load.image(`player-walk-${dir}-${i}`, `/assets/player/walk/${dir}_${i}.png`);
+    for (const avatar of AVATAR_TYPES) {
+      const base = AVATARS[avatar].dir;
+      for (const dir of FACINGS) {
+        this.load.image(`${avatar}-${dir}`, `${base}/idle/${dir}.png`);
+        for (let i = 0; i < 4; i++) {
+          this.load.image(`${avatar}-walk-${dir}-${i}`, `${base}/walk/${dir}_${i}.png`);
+        }
       }
     }
 
@@ -185,7 +215,7 @@ export class TradingPitScene extends Phaser.Scene {
     this.placeFurniture();
     this.createPitHint();
 
-    this.local = this.createAvatar(this.myIdentityHex || 'local', 'You', 'human', 3, 5, 'south');
+    this.local = this.createAvatar(this.myIdentityHex || 'local', 'You', 'human', 'trader', 3, 5, 'south');
     this.setName(this.local, 'You', '#ffe066');
     this.cameras.main.startFollow(this.local.body, true, 0.15, 0.15);
 
@@ -199,7 +229,7 @@ export class TradingPitScene extends Phaser.Scene {
         D: this.input.keyboard.addKey('D', false),
       };
       this.input.keyboard.addKey('E', false).on('down', () => {
-        if (this.inputEnabled && this.inPit && !this.isTyping()) {
+        if (this.inputEnabled && this.currentPit && !this.isTyping()) {
           this.callbacks.onTogglePitOverlay?.(true);
         }
       });
@@ -324,18 +354,16 @@ export class TradingPitScene extends Phaser.Scene {
   }
 
   private buildWalkAnimations() {
-    for (const dir of FACINGS) {
-      const frames = [0, 1, 2, 3].map(i => `player-walk-${dir}-${i}`);
-      if (!frames.every(k => this.has(k))) continue;
-      if (!this.anims.exists(`walk-${dir}`)) {
-        this.anims.create({
-          key: `walk-${dir}`,
-          frames: frames.map(key => ({ key })),
-          frameRate: 10,
-          repeat: -1,
-        });
+    for (const avatar of AVATAR_TYPES) {
+      for (const dir of FACINGS) {
+        const frames = [0, 1, 2, 3].map(i => `${avatar}-walk-${dir}-${i}`);
+        if (!frames.every(k => this.has(k))) continue;
+        const key = `walk-${avatar}-${dir}`;
+        if (!this.anims.exists(key)) {
+          this.anims.create({ key, frames: frames.map(f => ({ key: f })), frameRate: 10, repeat: -1 });
+        }
+        this.walkAnims.add(`${avatar}-${dir}`);
       }
-      this.walkAnims.add(dir);
     }
   }
 
@@ -350,14 +378,15 @@ export class TradingPitScene extends Phaser.Scene {
     depth: number,
   ) {
     const lookup = this.cache.json.get(lookupKey) as Record<string, number> | undefined;
-    if (!lookup) return false;
+    if (!lookup) return null;
     const ch = (b: boolean) => (b ? 'u' : 'l');
+    const images: Phaser.GameObjects.Image[] = [];
     for (const [c, r] of tiles) {
       const key = ch(isUpper(c, r)) + ch(isUpper(c + 1, r)) + ch(isUpper(c, r + 1)) + ch(isUpper(c + 1, r + 1));
       const frame = lookup[key] ?? lookup.llll;
-      this.add.image(c * T + T / 2, r * T + T / 2, sheet, frame).setDepth(depth);
+      images.push(this.add.image(c * T + T / 2, r * T + T / 2, sheet, frame).setDepth(depth));
     }
-    return true;
+    return images;
   }
 
   private drawHallFloor() {
@@ -369,7 +398,7 @@ export class TradingPitScene extends Phaser.Scene {
       vx >= FX + PIT.minX && vx <= FX + PIT.maxX + 1 && vy >= FY + PIT.minY && vy <= FY + PIT.maxY + 1;
 
     const ok =
-      this.has('floor') && this.paintWang('floor', 'floor-wang', tiles, pitUpper, -1000);
+      this.has('floor') && !!this.paintWang('floor', 'floor-wang', tiles, pitUpper, -1000);
     if (!ok) {
       for (const [c, r] of tiles) {
         const inPit = c - FX >= PIT.minX && c - FX <= PIT.maxX && r - FY >= PIT.minY && r - FY <= PIT.maxY;
@@ -393,7 +422,7 @@ export class TradingPitScene extends Phaser.Scene {
     const tiles: [number, number][] = [];
     for (let r = 0; r < MAP_H; r++) for (let c = 0; c < MAP_W; c++) tiles.push([c, r]);
 
-    const ok = this.has('plaza') && this.paintWang('plaza', 'plaza-wang', tiles, pavement, -1100);
+    const ok = this.has('plaza') && !!this.paintWang('plaza', 'plaza-wang', tiles, pavement, -1100);
     if (!ok) {
       for (const [c, r] of tiles) {
         const paved = pavement(c, r) && pavement(c + 1, r + 1);
@@ -499,7 +528,7 @@ export class TradingPitScene extends Phaser.Scene {
     this.panel(tx, faceTop + 14, tw, 18);
     this.tickerWidthChars = Math.floor((tw - 8) / 6);
     this.tickerText = this.text(tx + 4, faceTop + 20, '', 6, '#45f08a').setDepth(-870);
-    this.setTicker('CAL HACKS 13.0 * OPEN OUTCRY EXCHANGE * WALK INTO THE PIT AND PRESS [E] TO TRADE * 1 YES + 1 NO = $1.00');
+    this.setTicker('SERIOUS TRADING EXCHANGE * WALK INTO THE PIT AND PRESS [E] TO TRADE * 1 YES + 1 NO = $1.00');
     this.time.addEvent({
       delay: 140,
       loop: true,
@@ -523,6 +552,17 @@ export class TradingPitScene extends Phaser.Scene {
     this.noPriceText = this.text(rightX + bw - 4, faceTop + 21, '50¢', 8, '#ff6b6b').setOrigin(1, 0).setDepth(-870);
   }
 
+  /** Breaking news from the instructor leads the LED ticker until cleared. */
+  public setAlert(message: string) {
+    this.alertMessage = message;
+    this.refreshTicker();
+  }
+
+  private refreshTicker() {
+    if (!this.baseTicker) return;
+    this.setTicker(this.alertMessage ? `BREAKING: ${this.alertMessage.toUpperCase()} * ${this.baseTicker}` : this.baseTicker);
+  }
+
   private setTicker(message: string) {
     this.tickerMessage = `${message}   ***   `;
     this.tickerOffset = 0;
@@ -530,9 +570,8 @@ export class TradingPitScene extends Phaser.Scene {
 
   public updateMarketTicker(question: string, lastPrice: number, volume: number) {
     if (!this.tickerText) return;
-    this.setTicker(
-      `${question.toUpperCase()} * LAST ${lastPrice}¢ * YES ${lastPrice}% / NO ${100 - lastPrice}% * VOL ${volume} * PRESS [E] IN THE PIT TO TRADE`,
-    );
+    this.baseTicker = `${question.toUpperCase()} * LAST ${lastPrice}¢ * YES ${lastPrice}% / NO ${100 - lastPrice}% * VOL ${volume} * PRESS [E] IN THE PIT TO TRADE`;
+    this.refreshTicker();
     this.yesPriceText.setText(`${lastPrice}¢`);
     this.noPriceText.setText(`${100 - lastPrice}¢`);
   }
@@ -591,9 +630,11 @@ export class TradingPitScene extends Phaser.Scene {
     const g = this.add.graphics().setDepth(y);
     const colors: Record<PropKey, number> = {
       desk: 0x6b4a2f, plant: 0x2f7a3a, post: 0x2a2633, bull: 0x8a5a2b, lamp: 0x3a3a48, bench: 0x9a6b3c, tree: 0x2f6b2a,
+      booth: 0x5a3a22,
     };
     const size: Record<PropKey, [number, number]> = {
       desk: [56, 30], plant: [18, 28], post: [52, 52], bull: [48, 30], lamp: [6, 48], bench: [52, 14], tree: [44, 56],
+      booth: [20, 30],
     };
     const [w, h] = size[key];
     g.fillStyle(colors[key]).fillRect(x - w / 2, y - h, w, h);
@@ -611,11 +652,115 @@ export class TradingPitScene extends Phaser.Scene {
     this.placeProp('post', (FX + 10) * T, (FY + 7) * T - 2, 1);
   }
 
+  // --- Market booths -----------------------------------------------------------------
+
+  /** Spawn, update or remove the 2x2 booths for markets placed on the floor. */
+  public syncPits(pits: PitData[]) {
+    if (!this.local) return;
+    const seen = new Set<string>();
+    for (const data of pits) {
+      seen.add(data.id);
+      const existing = this.pits.get(data.id);
+      if (existing && existing.data.x === data.x && existing.data.y === data.y) {
+        if (existing.data.title !== data.title || existing.data.price !== data.price) {
+          existing.label.forEach(o => o.destroy());
+          existing.label = this.boothLabel(data);
+          existing.data = data;
+        }
+        continue;
+      }
+      if (existing) this.destroyPit(existing);
+      this.pits.set(data.id, this.buildBooth(data));
+    }
+    for (const [id, pit] of this.pits) {
+      if (!seen.has(id)) {
+        this.destroyPit(pit);
+        this.pits.delete(id);
+      }
+    }
+    this.checkPitProximity();
+  }
+
+  private destroyPit(pit: Pit) {
+    pit.objects.forEach(o => o.destroy());
+    pit.label.forEach(o => o.destroy());
+  }
+
+  private buildBooth(data: PitData): Pit {
+    const objects: Phaser.GameObjects.GameObject[] = [];
+    const cx = FX + data.x;
+    const cy = FY + data.y;
+
+    // Carpet: vertices of the 2x2 block are "upper", painted over the base floor.
+    const tiles: [number, number][] = [];
+    for (let r = cy - 1; r <= cy + 2; r++) for (let c = cx - 1; c <= cx + 2; c++) tiles.push([c, r]);
+    const upper = (vx: number, vy: number) => vx >= cx && vx <= cx + 2 && vy >= cy && vy <= cy + 2;
+    const carpet = this.has('floor') ? this.paintWang('floor', 'floor-wang', tiles, upper, -999) : null;
+    if (carpet) objects.push(...carpet);
+    else objects.push(this.add.rectangle(cx * T, cy * T, 2 * T, 2 * T, 0x0f3d23).setOrigin(0).setDepth(-999));
+
+    // Podium at the back of the carpet.
+    objects.push(this.placeProp('booth', (cx + 1) * T, (cy + 1) * T, 1));
+
+    // Arrival puff so a freshly deployed pit is noticeable.
+    const ring = this.add.circle((cx + 1) * T, (cy + 1) * T, 8, 0xffe066, 0.6).setDepth(100001);
+    this.ignoreOnMinimap(ring);
+    this.tweens.add({ targets: ring, radius: 48, alpha: 0, duration: 700, ease: 'Cubic.easeOut', onComplete: () => ring.destroy() });
+
+    // Minimap marker
+    const marker = this.add.rectangle((cx + 1) * T, (cy + 1) * T, 40, 40, 0x45f08a).setStrokeStyle(4, 0x0b0d14).setDepth(199999);
+    this.cameras.main.ignore(marker);
+    objects.push(marker);
+
+    return { data, objects, label: this.boothLabel(data) };
+  }
+
+  /** Small LED sign floating over a booth: short question + YES price. */
+  private boothLabel(data: PitData) {
+    const cx = (FX + data.x + 1) * T;
+    const top = (FY + data.y + 1) * T - 48 - 26; // above the 48px podium
+    const title = data.title.length > 18 ? `${data.title.slice(0, 17)}…` : data.title;
+    const t1 = this.text(cx, top + 3, title.toUpperCase(), 4, '#45f08a').setOrigin(0.5, 0);
+    const t2 = this.text(cx, top + 10, `YES ${data.price}¢`, 4, '#ffe066').setOrigin(0.5, 0);
+    const w = Math.ceil(Math.max(t1.displayWidth, t2.displayWidth)) + 8;
+    const g = this.add.graphics();
+    g.fillStyle(0x2a2633).fillRect(cx - w / 2 - 2, top - 2, w + 4, 21);
+    g.fillStyle(0x0b0d14).fillRect(cx - w / 2, top, w, 17);
+    g.fillStyle(0x2a2633).fillRect(cx - 1, top + 19, 2, 6);
+    g.setDepth(99989);
+    t1.setDepth(99990);
+    t2.setDepth(99990);
+    const objs = [g, t1, t2];
+    objs.forEach(o => this.ignoreOnMinimap(o));
+    return objs;
+  }
+
+  private pitAt(x: number, y: number): string | null {
+    if (x >= PROX.minX && x <= PROX.maxX && y >= PROX.minY && y <= PROX.maxY) return MAIN_PIT;
+    for (const [id, pit] of this.pits) {
+      const { x: px, y: py } = pit.data;
+      if (x >= px - 1 && x <= px + 2 && y >= py - 1 && y <= py + 2) return id;
+    }
+    return null;
+  }
+
+  private placePitHint(pitId: string) {
+    this.tweens.killTweensOf(this.pitHint);
+    let x = (FX + 10) * T;
+    let y = (FY + PIT.minY) * T - 10;
+    const pit = this.pits.get(pitId);
+    if (pit) {
+      x = (FX + pit.data.x + 1) * T;
+      y = (FY + pit.data.y + 1) * T - 48 - 30;
+    }
+    this.pitHint.setPosition(x, y);
+    this.tweens.add({ targets: this.pitHint, y: y - 3, duration: 650, yoyo: true, repeat: -1, ease: 'Sine.easeInOut' });
+  }
+
   private createPitHint() {
     this.pitHint = this.makeBubble('Press E to trade!', '#1d1b2a');
-    this.pitHint.setPosition((FX + 10) * T, (FY + PIT.minY) * T - 10).setDepth(100000).setVisible(false);
+    this.pitHint.setDepth(100000).setVisible(false);
     this.ignoreOnMinimap(this.pitHint);
-    this.tweens.add({ targets: this.pitHint, y: this.pitHint.y - 3, duration: 650, yoyo: true, repeat: -1, ease: 'Sine.easeInOut' });
   }
 
   // --- Speech bubbles ------------------------------------------------------------
@@ -693,19 +838,30 @@ export class TradingPitScene extends Phaser.Scene {
 
   // --- Avatars -------------------------------------------------------------------
 
-  private textureFor(kind: AgentKind, facing: Facing) {
-    if (kind !== 'human' && this.has(`${kind}-${facing}`)) return `${kind}-${facing}`;
-    return this.has(`player-${facing}`) ? `player-${facing}` : `player-south`;
+  private textureFor(a: { kind: AgentKind; avatarType: AvatarType }, facing: Facing) {
+    if (a.kind !== 'human' && this.has(`${a.kind}-${facing}`)) return `${a.kind}-${facing}`;
+    for (const avatar of [a.avatarType, 'trader'] as AvatarType[]) {
+      if (this.has(`${avatar}-${facing}`)) return `${avatar}-${facing}`;
+    }
+    return 'trader-south';
   }
 
   private usesOwnSprite(kind: AgentKind) {
     return kind !== 'human' && this.has(`${kind}-south`);
   }
 
-  private createAvatar(id: string, name: string, kind: AgentKind, gx: number, gy: number, facing: Facing): Avatar {
+  private createAvatar(
+    id: string,
+    name: string,
+    kind: AgentKind,
+    avatarType: AvatarType,
+    gx: number,
+    gy: number,
+    facing: Facing,
+  ): Avatar {
     const body = this.add.container(wx(gx), wy(gy));
     const shadow = this.add.ellipse(0, 14, 18, 6, 0x000000, 0.3);
-    const sprite = this.add.sprite(0, 16, this.textureFor(kind, facing)).setOrigin(0.5, 1);
+    const sprite = this.add.sprite(0, 16, this.textureFor({ kind, avatarType }, facing)).setOrigin(0.5, 1);
     const style = AGENT_STYLE[kind];
     if (style.tint !== null && !this.usesOwnSprite(kind)) sprite.setTint(style.tint);
     body.add([shadow, sprite]);
@@ -724,6 +880,7 @@ export class TradingPitScene extends Phaser.Scene {
     return {
       identityHex: id,
       kind,
+      avatarType,
       body,
       sprite,
       overhead,
@@ -760,18 +917,18 @@ export class TradingPitScene extends Phaser.Scene {
 
   private face(a: Avatar, facing: Facing) {
     a.facing = facing;
-    if (!a.sprite.anims.isPlaying) a.sprite.setTexture(this.textureFor(a.kind, facing));
+    if (!a.sprite.anims.isPlaying) a.sprite.setTexture(this.textureFor(a, facing));
   }
 
   private startWalk(a: Avatar) {
-    if (!this.usesOwnSprite(a.kind) && this.walkAnims.has(a.facing)) {
-      a.sprite.play(`walk-${a.facing}`, true);
+    if (!this.usesOwnSprite(a.kind) && this.walkAnims.has(`${a.avatarType}-${a.facing}`)) {
+      a.sprite.play(`walk-${a.avatarType}-${a.facing}`, true);
     }
   }
 
   private stopWalk(a: Avatar) {
     a.sprite.anims.stop();
-    a.sprite.setTexture(this.textureFor(a.kind, a.facing));
+    a.sprite.setTexture(this.textureFor(a, a.facing));
   }
 
   private moveAvatarTo(a: Avatar, gx: number, gy: number, duration: number, onComplete?: () => void) {
@@ -802,6 +959,10 @@ export class TradingPitScene extends Phaser.Scene {
       if (p.identityHex === myIdentityHex) {
         this.local.identityHex = p.identityHex;
         this.setName(this.local, `${p.username} (you)`, '#ffe066');
+        if (this.local.avatarType !== p.avatarType) {
+          this.local.avatarType = p.avatarType;
+          this.stopWalk(this.local);
+        }
         if (!this.localReady || (!this.isMoving && (p.x !== this.local.gridX || p.y !== this.local.gridY))) {
           if (!this.isMoving) {
             this.local.gridX = p.x;
@@ -821,9 +982,9 @@ export class TradingPitScene extends Phaser.Scene {
 
       seen.add(p.identityHex);
       let a = this.avatars.get(p.identityHex);
-      if (!a || a.kind !== p.kind) {
+      if (!a || a.kind !== p.kind || a.avatarType !== p.avatarType) {
         if (a) this.destroyAvatar(a);
-        a = this.createAvatar(p.identityHex, p.username, p.kind, p.x, p.y, facingFor(p.direction));
+        a = this.createAvatar(p.identityHex, p.username, p.kind, p.avatarType, p.x, p.y, facingFor(p.direction));
         this.avatars.set(p.identityHex, a);
       }
 
@@ -889,7 +1050,7 @@ export class TradingPitScene extends Phaser.Scene {
     if (this.local.facing !== facing) {
       this.local.facing = facing;
       this.local.sprite.anims.stop();
-      this.local.sprite.setTexture(this.textureFor('human', facing));
+      this.local.sprite.setTexture(this.textureFor(this.local, facing));
     }
 
     if (tx < 0 || tx >= COLS || ty < 0 || ty >= ROWS || BLOCKED.has(`${tx},${ty}`)) {
@@ -906,12 +1067,13 @@ export class TradingPitScene extends Phaser.Scene {
   }
 
   private checkPitProximity() {
-    const { gridX: x, gridY: y } = this.local;
-    const inside = x >= PROX.minX && x <= PROX.maxX && y >= PROX.minY && y <= PROX.maxY;
-    if (inside !== this.inPit) {
-      this.inPit = inside;
-      this.pitHint.setVisible(inside);
-      this.callbacks.onProximityChange?.(inside);
+    if (!this.local || !this.pitHint) return;
+    const pit = this.pitAt(this.local.gridX, this.local.gridY);
+    if (pit !== this.currentPit) {
+      this.currentPit = pit;
+      if (pit) this.placePitHint(pit);
+      this.pitHint.setVisible(!!pit);
+      this.callbacks.onProximityChange?.(pit);
     }
   }
 }

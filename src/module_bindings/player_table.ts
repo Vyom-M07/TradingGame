@@ -18,4 +18,7 @@ export default __t.row({
   y: __t.i32(),
   direction: __t.string(),
   createdAt: __t.timestamp().name("created_at"),
+  role: __t.string(),
+  avatarType: __t.string().name("avatar_type"),
+  onFloor: __t.bool().name("on_floor"),
 });
