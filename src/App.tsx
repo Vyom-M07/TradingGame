@@ -8,6 +8,7 @@ import { TradingPitOverlay } from './components/TradingPitOverlay';
 import { Hud, NewsFlash } from './components/Hud';
 import { LobbyModal } from './components/LobbyModal';
 import { HelpDialog, ProfileDialog } from './components/Dialogs';
+import { SettingsDialog } from './components/SettingsDialog';
 import { BreakingBanner, LeaderboardReveal } from './components/RoundOverlays';
 import { LoginScreen } from './components/LoginScreen';
 
@@ -25,6 +26,8 @@ export default function App() {
   const [gameStates, gameStateReady] = useTable(tables.gameState);
   // Empty for students until the instructor ends the round.
   const [leaderboard] = useTable(tables.leaderboard);
+  const [botConfigs] = useTable(tables.botConfig);
+  const [botTraders] = useTable(tables.botTrader);
 
   // SpacetimeDB reducers
   const movePlayerReducer = useReducer(reducers.movePlayer);
@@ -33,6 +36,8 @@ export default function App() {
   const joinLobbyReducer = useReducer(reducers.joinLobby);
   const setUsernameReducer = useReducer(reducers.setUsername);
   const joinGameReducer = useReducer(reducers.joinGame);
+  const setSoloBotsReducer = useReducer(reducers.setSoloBots);
+  const botTickReducer = useReducer(reducers.optimalBotTick);
 
   // Login gate: Phaser only mounts after join_game succeeds this session.
   const [joined, setJoined] = useState(false);
@@ -44,6 +49,7 @@ export default function App() {
   const [isLobbyModalOpen, setIsLobbyModalOpen] = useState(false);
   const [isHelpOpen, setIsHelpOpen] = useState(false);
   const [isProfileOpen, setIsProfileOpen] = useState(false);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [minimapVisible, setMinimapVisible] = useState(true);
   const [news, setNews] = useState<{ title: string; content: string } | null>(null);
   const [breaking, setBreaking] = useState<{ message: string; key: string } | null>(null);
@@ -52,8 +58,9 @@ export default function App() {
   const gameState = gameStates[0] ?? null;
   const roundOver = !!gameState?.isLeaderboardRevealed;
   const alertMessage = gameState?.newsTickerMessage ?? '';
+  const botConfig = botConfigs[0] ?? null;
 
-  const anyOverlayOpen = isPitOverlayOpen || isLobbyModalOpen || isHelpOpen || isProfileOpen;
+  const anyOverlayOpen = isPitOverlayOpen || isLobbyModalOpen || isHelpOpen || isProfileOpen || isSettingsOpen;
 
   const sceneRef = useRef<TradingPitScene | null>(null);
 
@@ -118,6 +125,10 @@ export default function App() {
   const currentPlayer = useMemo(
     () => (myHex ? players.find(p => p.identity.toHexString() === myHex) ?? null : null),
     [players, myHex]
+  );
+  const whalePlayer = useMemo(
+    () => players.find(p => p.avatarType === 'whale' || p.username.toLowerCase().includes('whale')) ?? null,
+    [players]
   );
   const isInstructor = currentPlayer?.role === 'INSTRUCTOR';
   // Back to the login screen if the server took us off the floor (2 min disconnect).
@@ -227,6 +238,17 @@ export default function App() {
     }
   }, [roundOver]);
 
+  // Solo bot loop: ticks the active pit when enabled by the player and not controlled by instructor
+  useEffect(() => {
+    if (!botConfig?.ammEnabled || botConfig.controlledBy === 'INSTRUCTOR' || !connected) return;
+    const timer = setInterval(() => {
+      if (focusMarket && focusMarket.status === 'OPEN') {
+        void botTickReducer({ marketId: focusMarket.marketId }).catch(() => undefined);
+      }
+    }, botConfig.tickMs || 1000);
+    return () => clearInterval(timer);
+  }, [botConfig?.ammEnabled, botConfig?.controlledBy, botConfig?.tickMs, connected, focusMarket, botTickReducer]);
+
   const handlePlayerMove = useCallback(
     (x: number, y: number, direction: string) => {
       if (!connected) return;
@@ -305,10 +327,12 @@ export default function App() {
         activeLobby={activeLobby}
         isInstructor={isInstructor}
         isInsidePit={!!nearPit}
+        isBotsActive={!!botConfig?.ammEnabled}
         minimapVisible={minimapVisible}
         onToggleMinimap={() => setMinimapVisible(v => !v)}
         onOpenTradingPit={openTerminal}
         onOpenLobby={() => setIsLobbyModalOpen(true)}
+        onOpenSettings={() => setIsSettingsOpen(true)}
         onOpenHelp={() => setIsHelpOpen(true)}
         onOpenProfile={() => setIsProfileOpen(true)}
         onDirection={dir => sceneRef.current?.setVirtualDirection(dir)}
@@ -348,6 +372,14 @@ export default function App() {
         onClose={() => setIsProfileOpen(false)}
         username={currentPlayer?.username ?? ''}
         onSave={name => setUsernameReducer({ username: name })}
+      />
+      <SettingsDialog
+        isOpen={isSettingsOpen}
+        onClose={() => setIsSettingsOpen(false)}
+        botConfig={botConfig}
+        bots={botTraders}
+        whale={whalePlayer}
+        onSetBots={(enabled, tickMs) => setSoloBotsReducer({ enabled, tickMs })}
       />
 
       {roundOver && (

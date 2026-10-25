@@ -186,6 +186,32 @@ const instructorConfig = table(
 // SCHEMA
 // -----------------------------------------------------------------------------
 
+
+const botConfig = table(
+  { name: 'bot_config', public: true },
+  {
+    id: t.u32().primaryKey(),
+    ammEnabled: t.bool(),
+    whaleEnabled: t.bool(),
+    tickMs: t.u32(),
+    controlledBy: t.string(),
+  }
+);
+
+const botTrader = table(
+  { name: 'bot_trader', public: true },
+  {
+    botId: t.u64().primaryKey().autoInc(),
+    name: t.string(),
+    role: t.string(),
+    marketId: t.u64(),
+    x: t.i32(),
+    y: t.i32(),
+    direction: t.string(),
+    tradeCount: t.u32(),
+  }
+);
+
 const spacetimedb = schema({
   player,
   market,
@@ -196,6 +222,8 @@ const spacetimedb = schema({
   lobby,
   lobbyParticipant,
   gameState,
+  botConfig,
+  botTrader,
   instructorConfig,
   activeConnection,
   disconnectTimer,
@@ -209,7 +237,7 @@ type ReadDb = ViewCtx<InferSchema<typeof spacetimedb>>['db'];
 
 const DEFAULT_INSTRUCTOR_PASSCODE = 'CALHACKS13';
 
-const AVATAR_TYPES = ['trader', 'businesswoman'];
+const AVATAR_TYPES = ['trader', 'businesswoman', 'robot', 'whale'];
 const SPAWN = { x: 3, y: 5 };
 const DISCONNECT_GRACE_MICROS = 120_000_000n; // 2 minutes
 
@@ -1427,6 +1455,86 @@ export const startNewRound = spacetimedb.reducer(ctx => {
     newsPostedAt: ctx.timestamp,
   });
 });
+
+
+/** Register the external Whale bot using the instructor passcode. */
+export const registerWhale = spacetimedb.reducer(
+  { name: t.string(), passcode: t.string() },
+  (ctx, { name, passcode }) => {
+    const cfg = ctx.db.instructorConfig.id.find(0);
+    const expected = cfg?.passcode ?? DEFAULT_INSTRUCTOR_PASSCODE;
+    if (passcode.trim() !== expected) throw new SenderError('Incorrect passcode');
+    const trimmed = assertUniqueName(ctx, name);
+    const p = getOrCreatePlayer(ctx);
+    cancelDisconnectTimers(ctx, ctx.sender);
+    ctx.db.player.identity.update({
+      ...p,
+      username: trimmed,
+      avatarType: 'whale',
+      role: 'STUDENT',
+      onFloor: true,
+      cashBalance: p.cashBalance < 500_000n ? 500_000n : p.cashBalance,
+      x: p.onFloor ? p.x : 9,
+      y: p.onFloor ? p.y : 6,
+      direction: 'south',
+    });
+  }
+);
+
+/** Solo player toggle for market maker bots on the floor. */
+export const setSoloBots = spacetimedb.reducer(
+  { enabled: t.bool(), tickMs: t.u32() },
+  (ctx, { enabled, tickMs }) => {
+    const cfg = ctx.db.botConfig.id.find(0);
+    if (cfg && cfg.ammEnabled && cfg.controlledBy === 'INSTRUCTOR') {
+      throw new SenderError('Bots are currently controlled by the instructor');
+    }
+    const speed = tickMs >= 200 && tickMs <= 5000 ? tickMs : 1000;
+    if (cfg) {
+      ctx.db.botConfig.id.update({
+        ...cfg,
+        ammEnabled: enabled,
+        tickMs: speed,
+        controlledBy: 'STUDENT',
+      });
+    } else {
+      ctx.db.botConfig.insert({
+        id: 0,
+        ammEnabled: enabled,
+        whaleEnabled: true,
+        tickMs: speed,
+        controlledBy: 'STUDENT',
+      });
+    }
+  }
+);
+
+/** Instructor global configuration for bots and the AI Whale. */
+export const setBotConfig = spacetimedb.reducer(
+  { ammEnabled: t.bool(), whaleEnabled: t.bool(), tickMs: t.u32() },
+  (ctx, { ammEnabled, whaleEnabled, tickMs }) => {
+    requireInstructor(ctx);
+    const speed = tickMs >= 200 && tickMs <= 5000 ? tickMs : 1000;
+    const cfg = ctx.db.botConfig.id.find(0);
+    if (cfg) {
+      ctx.db.botConfig.id.update({
+        ...cfg,
+        ammEnabled,
+        whaleEnabled,
+        tickMs: speed,
+        controlledBy: 'INSTRUCTOR',
+      });
+    } else {
+      ctx.db.botConfig.insert({
+        id: 0,
+        ammEnabled,
+        whaleEnabled,
+        tickMs: speed,
+        controlledBy: 'INSTRUCTOR',
+      });
+    }
+  }
+);
 
 // -----------------------------------------------------------------------------
 // LEADERBOARD VIEW

@@ -9,3 +9,6 @@ spacetime.local.json
 .env.local
 .env.development
 .env.production
+
+scripts/.whale_token.*
+*.tsbuildinfo

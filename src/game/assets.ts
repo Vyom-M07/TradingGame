@@ -34,12 +34,14 @@ export const FACINGS: Facing[] = ['south', 'north', 'east', 'west'];
 
 // Playable avatars chosen on the login screen. Each folder holds
 // idle/<facing>.png and walk/<facing>_<0-3>.png, feet on the bottom edge.
-export type AvatarType = 'trader' | 'businesswoman';
+export type AvatarType = 'trader' | 'businesswoman' | 'robot' | 'whale';
 
 // `canvas` is the frame size in pixels (used to preview both at the same scale).
 export const AVATARS: Record<AvatarType, { label: string; dir: string; canvas: number }> = {
   trader: { label: 'Serious Trader #1', dir: '/assets/player', canvas: 32 },
   businesswoman: { label: 'Serious Trader #2', dir: '/assets/businesswoman', canvas: 40 },
+  robot: { label: 'Market Maker Bot', dir: '/assets/robot', canvas: 32 },
+  whale: { label: 'The Whale [AI]', dir: '/assets/whale', canvas: 32 },
 };
 
 export const AVATAR_TYPES = Object.keys(AVATARS) as AvatarType[];

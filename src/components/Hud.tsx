@@ -10,10 +10,12 @@ interface HudProps {
   activeLobby: Lobby | null;
   isInstructor: boolean;
   isInsidePit: boolean;
+  isBotsActive?: boolean;
   minimapVisible: boolean;
   onToggleMinimap: () => void;
   onOpenTradingPit: () => void;
   onOpenLobby: () => void;
+  onOpenSettings?: () => void;
   onOpenHelp: () => void;
   onOpenProfile: () => void;
   onDirection: (direction: string | null) => void;
@@ -91,9 +93,11 @@ function TopNav({
   activeLobby,
   isInstructor,
   isInsidePit,
+  isBotsActive,
   player,
   onOpenTradingPit,
   onOpenLobby,
+  onOpenSettings,
   onOpenProfile,
 }: HudProps) {
   return (
@@ -110,6 +114,16 @@ function TopNav({
       <div className="hang-top">
         <button className="sign" onClick={onOpenLobby} title="Lobby and invite QR code">
           Lobby <span className="text-amber-600">{activeLobby?.code ?? '----'}</span>
+        </button>
+      </div>
+      <div className="hang-top">
+        <button
+          className={`sign ${isBotsActive ? 'sign-active' : ''}`}
+          onClick={onOpenSettings}
+          title="Solo bots and AI Whale controls"
+        >
+          <span className={`inline-block h-2 w-2 ${isBotsActive ? 'bg-amber-400' : 'bg-slate-400'} shadow-[0_0_0_2px_#1d1b2a]`} />
+          Bots
         </button>
       </div>
       {isInstructor && (
@@ -202,11 +216,11 @@ function TouchPad({ onDirection }: { onDirection: (direction: string | null) => 
     </button>
   );
   return (
-    <div className="pointer-events-auto absolute bottom-6 left-6 hidden h-[168px] w-[168px] [@media(pointer:coarse)]:block">
-      {btn('up', '▲', 'left-14 top-0')}
-      {btn('left', '◀', 'left-0 top-14')}
-      {btn('right', '▶', 'left-28 top-14')}
-      {btn('down', '▼', 'left-14 top-28')}
+    <div className="pointer-events-auto absolute bottom-4 left-4 h-44 w-44 sm:hidden">
+      {btn('up', '▲', 'top-0 left-14')}
+      {btn('left', '◀', 'top-14 left-0')}
+      {btn('right', '▶', 'top-14 right-0')}
+      {btn('down', '▼', 'bottom-0 left-14')}
     </div>
   );
 }
@@ -219,7 +233,7 @@ export function NewsFlash({ title, content, onDone }: { title: string; content: 
 
   return (
     <div className="pointer-events-auto fixed left-1/2 top-[22%] z-40 w-[min(560px,90vw)] -translate-x-1/2">
-      <div className="panel pop-in relative p-4 text-center" onClick={onDone}>
+      <div className="panel pop-in relative p-4 text-center cursor-pointer" onClick={onDone}>
         <div className="mb-2 inline-block bg-rose-600 px-2 py-1 text-[9px] text-white">NEWS FLASH</div>
         <div className="text-[13px] leading-relaxed">{title}</div>
         <div className="mt-2 text-[10px] leading-[1.7] text-slate-600">{content}</div>

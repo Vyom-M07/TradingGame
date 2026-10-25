@@ -16,6 +16,27 @@ export const ActiveConnection = __t.object("ActiveConnection", {
 });
 export type ActiveConnection = __Infer<typeof ActiveConnection>;
 
+export const BotConfig = __t.object("BotConfig", {
+  id: __t.u32(),
+  ammEnabled: __t.bool(),
+  whaleEnabled: __t.bool(),
+  tickMs: __t.u32(),
+  controlledBy: __t.string(),
+});
+export type BotConfig = __Infer<typeof BotConfig>;
+
+export const BotTrader = __t.object("BotTrader", {
+  botId: __t.u64(),
+  name: __t.string(),
+  role: __t.string(),
+  marketId: __t.u64(),
+  x: __t.i32(),
+  y: __t.i32(),
+  direction: __t.string(),
+  tradeCount: __t.u32(),
+});
+export type BotTrader = __Infer<typeof BotTrader>;
+
 export const Clue = __t.object("Clue", {
   clueId: __t.u64(),
   marketId: __t.u64(),

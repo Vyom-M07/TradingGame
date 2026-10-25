@@ -47,12 +47,15 @@ import ModifyMarketReducer from "./modify_market_reducer";
 import MovePlayerReducer from "./move_player_reducer";
 import OptimalBotTickReducer from "./optimal_bot_tick_reducer";
 import PlaceOrderReducer from "./place_order_reducer";
+import RegisterWhaleReducer from "./register_whale_reducer";
 import ResetLobbyBalancesReducer from "./reset_lobby_balances_reducer";
 import ResetMarketReducer from "./reset_market_reducer";
 import ResolveMarketReducer from "./resolve_market_reducer";
 import RevealClueReducer from "./reveal_clue_reducer";
+import SetBotConfigReducer from "./set_bot_config_reducer";
 import SetInstructorPasscodeReducer from "./set_instructor_passcode_reducer";
 import SetPlayerRoleReducer from "./set_player_role_reducer";
+import SetSoloBotsReducer from "./set_solo_bots_reducer";
 import SetUsernameReducer from "./set_username_reducer";
 import StartNewRoundReducer from "./start_new_round_reducer";
 import TriggerEndRoundReducer from "./trigger_end_round_reducer";
@@ -60,6 +63,8 @@ import TriggerEndRoundReducer from "./trigger_end_round_reducer";
 // Import all procedure arg schemas
 
 // Import all table schema definitions
+import BotConfigRow from "./bot_config_table";
+import BotTraderRow from "./bot_trader_table";
 import ClueRow from "./clue_table";
 import GameStateRow from "./game_state_table";
 import LeaderboardRow from "./leaderboard_table";
@@ -75,6 +80,28 @@ import TradeRow from "./trade_table";
 
 /** The schema information for all tables in this module. This is defined the same was as the tables would have been defined in the server. */
 const tablesSchema = __schema({
+  botConfig: __table({
+    name: 'bot_config',
+    indexes: [
+      { accessor: 'id', name: 'bot_config_id_idx_btree', algorithm: 'btree', columns: [
+        'id',
+      ] },
+    ],
+    constraints: [
+      { name: 'bot_config_id_key', constraint: 'unique', columns: ['id'] },
+    ],
+  }, BotConfigRow),
+  botTrader: __table({
+    name: 'bot_trader',
+    indexes: [
+      { accessor: 'botId', name: 'bot_trader_bot_id_idx_btree', algorithm: 'btree', columns: [
+        'botId',
+      ] },
+    ],
+    constraints: [
+      { name: 'bot_trader_bot_id_key', constraint: 'unique', columns: ['botId'] },
+    ],
+  }, BotTraderRow),
   clue: __table({
     name: 'clue',
     indexes: [
@@ -225,12 +252,15 @@ const reducersSchema = __reducers(
   __reducerSchema("move_player", MovePlayerReducer),
   __reducerSchema("optimal_bot_tick", OptimalBotTickReducer),
   __reducerSchema("place_order", PlaceOrderReducer),
+  __reducerSchema("register_whale", RegisterWhaleReducer),
   __reducerSchema("reset_lobby_balances", ResetLobbyBalancesReducer),
   __reducerSchema("reset_market", ResetMarketReducer),
   __reducerSchema("resolve_market", ResolveMarketReducer),
   __reducerSchema("reveal_clue", RevealClueReducer),
+  __reducerSchema("set_bot_config", SetBotConfigReducer),
   __reducerSchema("set_instructor_passcode", SetInstructorPasscodeReducer),
   __reducerSchema("set_player_role", SetPlayerRoleReducer),
+  __reducerSchema("set_solo_bots", SetSoloBotsReducer),
   __reducerSchema("set_username", SetUsernameReducer),
   __reducerSchema("start_new_round", StartNewRoundReducer),
   __reducerSchema("trigger_end_round", TriggerEndRoundReducer),

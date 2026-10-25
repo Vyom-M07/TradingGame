@@ -23,8 +23,10 @@ export default function InstructorApp() {
   const [lobbies] = useTable(tables.lobby);
   const [gameStates] = useTable(tables.gameState);
   const [leaderboard] = useTable(tables.leaderboard);
+  const [botConfigs] = useTable(tables.botConfig);
   const claimInstructor = useReducer(reducers.claimInstructor);
   const botTick = useReducer(reducers.optimalBotTick);
+  const setBotConfig = useReducer(reducers.setBotConfig);
 
   const myHex = identity?.toHexString() ?? '';
   const me = useMemo(() => players.find(p => p.identity.toHexString() === myHex) ?? null, [players, myHex]);
@@ -57,7 +59,8 @@ export default function InstructorApp() {
   }, []);
 
   // Market-making bots run from this tab: the lobby market plus every open floor pit.
-  const [botsRunning, setBotsRunning] = useState(false);
+  const botConfig = botConfigs[0] ?? null;
+  const botsRunning = !!botConfig?.ammEnabled && botConfig?.controlledBy === 'INSTRUCTOR';
   const botTargets = useRef<bigint[]>([]);
   botTargets.current = markets
     .filter(m => m.status === 'OPEN' && (m.locationX >= 0 || m.marketId === activeLobby?.marketId))
@@ -72,6 +75,13 @@ export default function InstructorApp() {
     }, BOT_TICK_MS);
     return () => clearInterval(timer);
   }, [botsRunning, connected, botTick]);
+
+  const handleToggleBots = useCallback(() => {
+    const next = !botsRunning;
+    void run(next ? 'Bots activated for all students' : 'Bots stopped', () =>
+      setBotConfig({ ammEnabled: next, tickMs: BOT_TICK_MS, whaleEnabled: true })
+    );
+  }, [botsRunning, run, setBotConfig]);
 
   const studentCount = players.filter(p => p.role !== 'INSTRUCTOR').length;
 
@@ -126,7 +136,7 @@ export default function InstructorApp() {
               players={players}
               onSelectLobby={setLobbyCode}
               botsRunning={botsRunning}
-              onToggleBots={() => setBotsRunning(b => !b)}
+              onToggleBots={handleToggleBots}
               run={run}
             />
           </div>
