@@ -10,9 +10,12 @@ import { LobbyModal } from './components/LobbyModal';
 import { HelpDialog, ProfileDialog } from './components/Dialogs';
 import { SettingsDialog } from './components/SettingsDialog';
 import { BreakingBanner, LeaderboardReveal } from './components/RoundOverlays';
-import { LoginScreen } from './components/LoginScreen';
+import { LoginScreen, type RoomChoice } from './components/LoginScreen';
 
 const botKey = (botId: bigint) => `bot-${botId}`;
+
+// Room code shared as ?lobby=CAL13 pre-fills the login screen.
+const URL_LOBBY_CODE = (new URLSearchParams(window.location.search).get('lobby') ?? '').trim().toUpperCase();
 
 export default function App() {
   const { isActive: connected, identity: myIdentity } = useSpacetimeDB();
@@ -28,8 +31,8 @@ export default function App() {
   const [gameStates, gameStateReady] = useTable(tables.gameState);
   // Empty for students until the instructor ends the round.
   const [leaderboard] = useTable(tables.leaderboard);
-  const [botConfigs] = useTable(tables.botConfig);
   const [botTraders] = useTable(tables.botTrader);
+  const [whaleAvatars] = useTable(tables.whaleAvatar);
 
   // SpacetimeDB reducers
   const movePlayerReducer = useReducer(reducers.movePlayer);
@@ -38,7 +41,11 @@ export default function App() {
   const joinLobbyReducer = useReducer(reducers.joinLobby);
   const setUsernameReducer = useReducer(reducers.setUsername);
   const joinGameReducer = useReducer(reducers.joinGame);
-  const setSoloBotsReducer = useReducer(reducers.setSoloBots);
+  const startSoloReducer = useReducer(reducers.startSolo);
+  const leaveLobbyReducer = useReducer(reducers.leaveLobby);
+  const setLobbyBotsReducer = useReducer(reducers.setLobbyBots);
+  const endLobbyRoundReducer = useReducer(reducers.endLobbyRound);
+  const startLobbyRoundReducer = useReducer(reducers.startLobbyRound);
 
   // Login gate: Phaser only mounts after join_game succeeds this session.
   const [joined, setJoined] = useState(false);
@@ -57,57 +64,33 @@ export default function App() {
   const [resultsHidden, setResultsHidden] = useState(false);
 
   const gameState = gameStates[0] ?? null;
-  const roundOver = !!gameState?.isLeaderboardRevealed;
   const alertMessage = gameState?.newsTickerMessage ?? '';
-  const botConfig = botConfigs[0] ?? null;
 
   const anyOverlayOpen = isPitOverlayOpen || isLobbyModalOpen || isHelpOpen || isProfileOpen || isSettingsOpen;
 
   const sceneRef = useRef<TradingPitScene | null>(null);
 
-  // Active Lobby State & URL Parameter (?lobby=CAL13)
-  const [selectedLobbyCode, setSelectedLobbyCode] = useState<string | null>(null);
-  const [selectedMarketId, setSelectedMarketId] = useState<bigint | null>(null);
+  const myHex = myIdentity?.toHexString() ?? '';
 
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const urlLobby = params.get('lobby');
-    if (urlLobby) setSelectedLobbyCode(urlLobby.trim().toUpperCase());
-  }, []);
+  const currentPlayer = useMemo(
+    () => (myHex ? players.find(p => p.identity.toHexString() === myHex) ?? null : null),
+    [players, myHex]
+  );
 
-  const activeLobby = useMemo(() => {
-    if (lobbies.length === 0) return null;
-    if (selectedLobbyCode) {
-      const found = lobbies.find(l => l.code.toUpperCase() === selectedLobbyCode);
-      if (found) return found;
-    }
-    return lobbies.find(l => l.code === 'CAL13') || lobbies[0];
-  }, [lobbies, selectedLobbyCode]);
-
-  // Sync market and join lobby
-  useEffect(() => {
-    if (activeLobby && connected) {
-      if (activeLobby.marketId) setSelectedMarketId(activeLobby.marketId);
-      try {
-        joinLobbyReducer({ code: activeLobby.code });
-      } catch {
-        // Ignored
-      }
-    }
-  }, [activeLobby?.code, activeLobby?.marketId, connected, joinLobbyReducer]);
-
-  // Fallback to first market if none selected
-  useEffect(() => {
-    if (markets.length > 0 && selectedMarketId === null) {
-      setSelectedMarketId(markets[0].marketId);
-    }
-  }, [markets, selectedMarketId]);
+  // The room you're in comes from the server; 0 means you're at the menu.
+  const activeLobby = useMemo(
+    () => (currentPlayer ? lobbies.find(l => l.lobbyId === currentPlayer.lobbyId) ?? null : null),
+    [lobbies, currentPlayer]
+  );
+  const roomId = activeLobby?.lobbyId ?? null;
+  const roundOver = !!activeLobby?.roundOver;
+  const isRoomOwner = !!activeLobby?.isSolo && activeLobby.instructor.toHexString() === myHex;
 
   // The lobby's market lives in the central pit.
-  const activeMarket = useMemo(() => {
-    if (!selectedMarketId && markets.length > 0) return markets[0];
-    return markets.find(m => m.marketId === selectedMarketId) ?? null;
-  }, [markets, selectedMarketId]);
+  const activeMarket = useMemo(
+    () => (activeLobby ? markets.find(m => m.marketId === activeLobby.marketId) ?? null : null),
+    [markets, activeLobby]
+  );
 
   const marketForPit = useCallback(
     (pit: string | null) => {
@@ -121,27 +104,33 @@ export default function App() {
   const focusMarket = marketForPit(nearPit);
   const overlayMarket = marketForPit(overlayPit);
 
-  const myHex = myIdentity?.toHexString() ?? '';
-
-  const currentPlayer = useMemo(
-    () => (myHex ? players.find(p => p.identity.toHexString() === myHex) ?? null : null),
-    [players, myHex]
+  // The whale sidecar's player row; onFloor means the process is running.
+  const whalePlayer = useMemo(
+    () => players.find(p => p.avatarType === 'whale' && p.onFloor) ?? null,
+    [players]
   );
-  const whalePlayer = useMemo(() => players.find(p => p.avatarType === 'whale') ?? null, [players]);
+  const roomBots = useMemo(() => botTraders.filter(b => b.lobbyId === roomId), [botTraders, roomId]);
+  const roomWhale = whalePlayer ? whaleAvatars.find(w => w.lobbyId === roomId) ?? null : null;
   const isInstructor = currentPlayer?.role === 'INSTRUCTOR';
-  // Back to the login screen if the server took us off the floor (2 min disconnect).
-  const needsLogin = !joined || currentPlayer?.onFloor === false;
+  const canControlBots = isRoomOwner || (isInstructor && !!activeLobby && !activeLobby.isSolo);
+  // Back to the login screen if the server took us off the floor (2 min
+  // disconnect) or we left our room.
+  const needsLogin = !joined || currentPlayer?.onFloor === false || !activeLobby;
 
   const focusPosition = useMemo(() => {
     if (!myHex || !focusMarket) return null;
     return positions.find(p => p.marketId === focusMarket.marketId && p.owner.toHexString() === myHex) ?? null;
   }, [positions, focusMarket, myHex]);
 
-  // Instructors observe invisibly; everyone else walks the floor.
+  // Instructors observe invisibly; everyone else in your room walks the floor.
   const phaserPlayers: PlayerData[] = useMemo(
     () =>
       players
-        .filter(p => p.identity.toHexString() === myHex || (p.onFloor && p.role !== 'INSTRUCTOR'))
+        .filter(
+          p =>
+            p.identity.toHexString() === myHex ||
+            (p.onFloor && p.role !== 'INSTRUCTOR' && p.avatarType !== 'whale' && p.lobbyId === roomId)
+        )
         .map(p => ({
           identityHex: p.identity.toHexString(),
           username: p.username,
@@ -152,9 +141,9 @@ export default function App() {
           kind: agentKindFor(p.username, p.avatarType),
           avatarType: avatarTypeFor(p.avatarType),
         }))
-        // Robot traders the server spawns while the bots are on.
+        // Robot traders the server spawns while this room's bots are on.
         .concat(
-          botTraders.map(b => ({
+          roomBots.map(b => ({
             identityHex: botKey(b.botId),
             username: b.name,
             cashBalance: 0,
@@ -164,8 +153,26 @@ export default function App() {
             kind: 'bot' as const,
             avatarType: 'robot' as const,
           }))
+        )
+        // The AI whale, while it's switched on in this room. Keyed by its
+        // identity so its fills get speech bubbles.
+        .concat(
+          roomWhale && whalePlayer
+            ? [
+                {
+                  identityHex: whalePlayer.identity.toHexString(),
+                  username: whalePlayer.username,
+                  cashBalance: Number(whalePlayer.cashBalance),
+                  x: roomWhale.x,
+                  y: roomWhale.y,
+                  direction: roomWhale.direction,
+                  kind: 'whale' as const,
+                  avatarType: 'whale' as const,
+                },
+              ]
+            : []
         ),
-    [players, botTraders, myHex]
+    [players, roomBots, roomWhale, whalePlayer, myHex, roomId]
   );
 
   // Who is behind a trade, for the tape.
@@ -179,11 +186,11 @@ export default function App() {
     [botTraders, players, myHex]
   );
 
-  // Markets the instructor deployed onto the floor get their own pit.
+  // Markets the instructor deployed onto the class floor get their own pit.
   const pits: PitData[] = useMemo(
     () =>
       markets
-        .filter(m => m.status === 'OPEN' && m.locationX >= 0 && m.locationY >= 0)
+        .filter(m => !activeLobby?.isSolo && m.lobbyId === 0n && m.status === 'OPEN' && m.locationX >= 0 && m.locationY >= 0)
         .map(m => ({
           id: m.marketId.toString(),
           x: m.locationX,
@@ -191,7 +198,7 @@ export default function App() {
           title: m.question,
           price: m.lastTradedPrice,
         })),
-    [markets]
+    [markets, activeLobby?.isSolo]
   );
 
   // Speech bubbles for new fills.
@@ -303,14 +310,23 @@ export default function App() {
   const closeNews = useCallback(() => setNews(null), []);
   const closeBreaking = useCallback(() => setBreaking(null), []);
 
-  const handleJoin = async (name: string, avatarType: AvatarType) => {
+  const handleJoin = async (name: string, avatarType: AvatarType, room: RoomChoice) => {
     await joinGameReducer({ name, avatarType });
+    if (room.kind === 'solo') await startSoloReducer();
+    else await joinLobbyReducer({ code: room.code });
     setJoined(true);
   };
 
   if (needsLogin) {
     return (
-      <LoginScreen connected={connected} ready={playersReady} players={players} me={currentPlayer} onJoin={handleJoin} />
+      <LoginScreen
+        connected={connected}
+        ready={playersReady}
+        players={players}
+        me={currentPlayer}
+        initialCode={URL_LOBBY_CODE}
+        onJoin={handleJoin}
+      />
     );
   }
 
@@ -340,7 +356,7 @@ export default function App() {
         activeLobby={activeLobby}
         isInstructor={isInstructor}
         isInsidePit={!!nearPit}
-        isBotsActive={!!botConfig?.ammEnabled}
+        isBotsActive={!!activeLobby?.botsEnabled}
         minimapVisible={minimapVisible}
         onToggleMinimap={() => setMinimapVisible(v => !v)}
         onOpenTradingPit={openTerminal}
@@ -372,12 +388,12 @@ export default function App() {
         isOpen={isLobbyModalOpen}
         onClose={() => setIsLobbyModalOpen(false)}
         activeLobby={activeLobby}
-        allLobbies={lobbies}
-        markets={markets}
-        onSelectLobby={l => {
-          setSelectedLobbyCode(l.code);
-          setSelectedMarketId(l.marketId);
-        }}
+        isRoomOwner={isRoomOwner}
+        onJoinCode={code => joinLobbyReducer({ code })}
+        onPlaySolo={() => startSoloReducer()}
+        onLeave={() => leaveLobbyReducer()}
+        onEndRound={() => endLobbyRoundReducer({ lobbyId: activeLobby!.lobbyId })}
+        onStartRound={() => startLobbyRoundReducer({ lobbyId: activeLobby!.lobbyId })}
       />
 
       <HelpDialog isOpen={isHelpOpen} onClose={() => setIsHelpOpen(false)} />
@@ -390,10 +406,13 @@ export default function App() {
       <SettingsDialog
         isOpen={isSettingsOpen}
         onClose={() => setIsSettingsOpen(false)}
-        botConfig={botConfig}
-        bots={botTraders}
-        whale={whalePlayer}
-        onSetBots={(enabled, tickMs) => setSoloBotsReducer({ enabled, tickMs })}
+        lobby={activeLobby}
+        canControl={canControlBots}
+        bots={roomBots}
+        whaleRunning={!!whalePlayer}
+        onSetBots={(botsEnabled, whaleEnabled, tickMs) =>
+          setLobbyBotsReducer({ lobbyId: activeLobby!.lobbyId, botsEnabled, whaleEnabled, tickMs })
+        }
       />
 
       {roundOver && (
@@ -403,6 +422,7 @@ export default function App() {
           avatarFor={hex => avatarTypeFor(players.find(p => p.identity.toHexString() === hex)?.avatarType ?? '')}
           hidden={resultsHidden}
           onToggleHidden={() => setResultsHidden(h => !h)}
+          onStartRound={isRoomOwner ? () => void startLobbyRoundReducer({ lobbyId: activeLobby!.lobbyId }) : undefined}
         />
       )}
     </div>

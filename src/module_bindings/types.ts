@@ -28,6 +28,7 @@ export type BotConfig = __Infer<typeof BotConfig>;
 export const BotTimer = __t.object("BotTimer", {
   scheduledId: __t.u64(),
   scheduledAt: __t.scheduleAt(),
+  lobbyId: __t.u64(),
 });
 export type BotTimer = __Infer<typeof BotTimer>;
 
@@ -40,6 +41,7 @@ export const BotTrader = __t.object("BotTrader", {
   y: __t.i32(),
   direction: __t.string(),
   tradeCount: __t.u32(),
+  lobbyId: __t.u64(),
 });
 export type BotTrader = __Infer<typeof BotTrader>;
 
@@ -83,6 +85,9 @@ export const LeaderboardEntry = __t.object("LeaderboardEntry", {
   cashCents: __t.u64(),
   holdingsCents: __t.u64(),
   netWorthCents: __t.u64(),
+  lobbyId: __t.u64(),
+  isAi: __t.bool(),
+  startingCents: __t.u64(),
 });
 export type LeaderboardEntry = __Infer<typeof LeaderboardEntry>;
 
@@ -94,6 +99,11 @@ export const Lobby = __t.object("Lobby", {
   marketId: __t.u64(),
   initialBalance: __t.u64(),
   createdAt: __t.timestamp(),
+  isSolo: __t.bool(),
+  botsEnabled: __t.bool(),
+  whaleEnabled: __t.bool(),
+  botTickMs: __t.u32(),
+  roundOver: __t.bool(),
 });
 export type Lobby = __Infer<typeof Lobby>;
 
@@ -120,6 +130,7 @@ export const Market = __t.object("Market", {
   locationX: __t.i32(),
   locationY: __t.i32(),
   revision: __t.u32(),
+  lobbyId: __t.u64(),
 });
 export type Market = __Infer<typeof Market>;
 
@@ -149,6 +160,7 @@ export const Player = __t.object("Player", {
   role: __t.string(),
   avatarType: __t.string(),
   onFloor: __t.bool(),
+  lobbyId: __t.u64(),
 });
 export type Player = __Infer<typeof Player>;
 
@@ -177,4 +189,12 @@ export const Trade = __t.object("Trade", {
   takerBotId: __t.u64(),
 });
 export type Trade = __Infer<typeof Trade>;
+
+export const WhaleAvatar = __t.object("WhaleAvatar", {
+  lobbyId: __t.u64(),
+  x: __t.i32(),
+  y: __t.i32(),
+  direction: __t.string(),
+});
+export type WhaleAvatar = __Infer<typeof WhaleAvatar>;
 

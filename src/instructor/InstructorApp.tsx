@@ -21,7 +21,6 @@ export default function InstructorApp() {
   const [lobbies] = useTable(tables.lobby);
   const [gameStates] = useTable(tables.gameState);
   const [leaderboard] = useTable(tables.leaderboard);
-  const [botConfigs] = useTable(tables.botConfig);
   const claimInstructor = useReducer(reducers.claimInstructor);
 
   const myHex = identity?.toHexString() ?? '';
@@ -29,11 +28,21 @@ export default function InstructorApp() {
   const isInstructor = me?.role === 'INSTRUCTOR';
   const gameState = gameStates[0] ?? null;
 
+  // The dashboard runs class rooms; solo rooms belong to their students.
+  const classLobbies = useMemo(() => lobbies.filter(l => !l.isSolo), [lobbies]);
+  const classMarkets = useMemo(() => markets.filter(m => m.lobbyId === 0n), [markets]);
   const [lobbyCode, setLobbyCode] = useState<string | null>(null);
   const activeLobby = useMemo(
-    () => lobbies.find(l => l.code === lobbyCode) ?? lobbies.find(l => l.code === 'CAL13') ?? lobbies[0] ?? null,
-    [lobbies, lobbyCode]
+    () =>
+      classLobbies.find(l => l.code === lobbyCode) ?? classLobbies.find(l => l.code === 'CAL13') ?? classLobbies[0] ?? null,
+    [classLobbies, lobbyCode]
   );
+  const roomRows = useMemo(
+    () => leaderboard.filter(r => r.lobbyId === activeLobby?.lobbyId),
+    [leaderboard, activeLobby?.lobbyId]
+  );
+  // The whale sidecar's player row; onFloor means the process is running.
+  const whale = players.find(p => p.avatarType === 'whale' && p.onFloor) ?? null;
 
   // Toast for reducer outcomes.
   const [toast, setToast] = useState<{ text: string; ok: boolean } | null>(null);
@@ -54,7 +63,9 @@ export default function InstructorApp() {
     }
   }, []);
 
-  const studentCount = players.filter(p => p.role !== 'INSTRUCTOR').length;
+  const studentCount = players.filter(
+    p => p.role !== 'INSTRUCTOR' && p.avatarType !== 'whale' && p.lobbyId === activeLobby?.lobbyId
+  ).length;
 
   if (!connected || !playersReady) {
     return <Screen><div className="panel p-6 text-[11px]">Connecting to the exchange…</div></Screen>;
@@ -92,22 +103,21 @@ export default function InstructorApp() {
       </header>
 
       <main className="mx-auto max-w-7xl space-y-5 p-5">
-        <RoundControl gameState={gameState} run={run} studentCount={studentCount} />
+        <RoundControl lobby={activeLobby} run={run} studentCount={studentCount} />
 
         <div className="grid gap-5 lg:grid-cols-12">
           <div className="lg:col-span-7">
-            <LeaderboardPanel rows={leaderboard} startingCents={activeLobby?.initialBalance ?? 10_000n} />
+            <LeaderboardPanel rows={roomRows} />
           </div>
           <div className="space-y-5 lg:col-span-5">
             <AlertPanel gameState={gameState} run={run} />
             <ClassroomPanel
-              lobbies={lobbies}
+              lobbies={classLobbies}
               activeLobby={activeLobby}
-              markets={markets}
-              players={players}
+              markets={classMarkets}
+              studentCount={studentCount}
               onSelectLobby={setLobbyCode}
-              botConfig={botConfigs[0] ?? null}
-              whale={players.find(p => p.avatarType === 'whale') ?? null}
+              whale={whale}
               run={run}
             />
           </div>
@@ -115,10 +125,10 @@ export default function InstructorApp() {
 
         <div className="grid gap-5 lg:grid-cols-12">
           <div className="lg:col-span-5">
-            <DeployMarketPanel markets={markets} run={run} />
+            <DeployMarketPanel markets={classMarkets} run={run} />
           </div>
           <div className="lg:col-span-7">
-            <MarketsPanel markets={markets} clues={clues} orders={orders} activeLobby={activeLobby} run={run} />
+            <MarketsPanel markets={classMarkets} clues={clues} orders={orders} activeLobby={activeLobby} run={run} />
           </div>
         </div>
       </main>

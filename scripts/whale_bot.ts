@@ -1,20 +1,22 @@
-// The Whale [AI] — an autonomous institutional trader for the Serious Trading floor.
+// Whale AI — an autonomous institutional trader for the Serious Trading floor.
 //
 // Runs as a standalone Node process next to the game:
 //
 //   npm run whale                       # local SpacetimeDB (.env.development)
 //   npm run whale -- --cloud            # Maincloud (.env.production)
 //
-// Every 10 seconds it reads one market's order book, clues and its own
-// inventory, asks Claude Haiku for a trade (or falls back to a built-in
-// expected-value sniper when ANTHROPIC_API_KEY is not set), places the order,
-// and walks its robot avatar over to that market's pit.
+// It trades only in rooms where an instructor (class rooms) or the owner
+// (solo rooms) has switched it on, and stops when a room's round ends. Every
+// 10 seconds it takes the next market across those rooms, reads its order book,
+// clues and its own inventory, asks Claude Haiku for a trade (or falls back to a
+// built-in expected-value sniper when ANTHROPIC_API_KEY is not set), places the
+// order, and walks its avatar in that room over to the market's pit.
 //
 // Environment (read from the shell, then .env.local, then .env.development /
 // .env.production):
 //   ANTHROPIC_API_KEY        optional; enables the Claude decision engine (any env file)
 //   WHALE_PASSCODE           instructor passcode (default CALHACKS13)
-//   WHALE_NAME               display name (default "The Whale [AI]")
+//   WHALE_NAME               display name (default "Whale AI")
 //   VITE_SPACETIMEDB_URI     e.g. ws://localhost:3000
 //   VITE_SPACETIMEDB_NAME    e.g. serious-trading-local
 
@@ -27,7 +29,7 @@ import { zodOutputFormat } from '@anthropic-ai/sdk/helpers/zod';
 import { z } from 'zod/v4';
 import type { Identity } from 'spacetimedb';
 import { DbConnection, tables } from '../src/module_bindings/index.ts';
-import type { Clue, Market, Order } from '../src/module_bindings/types.ts';
+import type { Clue, Lobby, Market, Order } from '../src/module_bindings/types.ts';
 
 // --- Config ------------------------------------------------------------------
 
@@ -50,7 +52,7 @@ for (const file of ENV_FILES) {
 
 const HOST = process.env.VITE_SPACETIMEDB_URI || 'ws://localhost:3000';
 const DB_NAME = process.env.VITE_SPACETIMEDB_NAME || 'serious-trading-local';
-const NAME = process.env.WHALE_NAME || 'The Whale [AI]';
+const NAME = process.env.WHALE_NAME || 'Whale AI';
 const PASSCODE = process.env.WHALE_PASSCODE || 'CALHACKS13';
 const MODEL = 'claude-haiku-5-5';
 const TICK_MS = 10_000;
@@ -78,6 +80,7 @@ const Decision = z.object({
 type Decision = z.infer<typeof Decision>;
 
 interface Snapshot {
+  room: Lobby;
   market: Market;
   clues: Clue[];
   bestBid: number; // best YES bid, 0 if none
@@ -96,7 +99,7 @@ interface Snapshot {
 let me: Identity | null = null;
 let registered = false;
 let marketCursor = 0;
-let walking = false;
+const walking = new Set<bigint>(); // rooms whose avatar is mid-walk
 
 const savedToken = fs.existsSync(TOKEN_FILE) ? fs.readFileSync(TOKEN_FILE, 'utf8').trim() : undefined;
 
@@ -129,8 +132,7 @@ conn
     tables.position,
     tables.clue,
     tables.lobby,
-    tables.botConfig,
-    tables.gameState,
+    tables.whaleAvatar,
   ]);
 
 async function register() {
@@ -152,20 +154,17 @@ setInterval(() => void tick(), TICK_MS);
 async function tick() {
   if (!registered || !me || !conn.isActive) return;
 
-  const cfg = conn.db.botConfig.id.find(0);
-  if (cfg && !cfg.whaleEnabled) return; // the instructor switched the whale off
-  if (conn.db.gameState.id.find(0)?.isLeaderboardRevealed) return; // round over
-
-  const markets = tradableMarkets();
-  if (markets.length === 0) {
-    void wander();
+  const rooms = activeRooms();
+  const work = rooms.flatMap(room => roomMarkets(room).map(market => ({ room, market })));
+  if (work.length === 0) {
+    for (const room of rooms) void wander(room);
     return;
   }
-  const market = markets[marketCursor++ % markets.length];
-  const snap = snapshot(market);
+  const { room, market } = work[marketCursor++ % work.length];
+  const snap = snapshot(room, market);
 
   cancelStaleOrders(snap);
-  void walkTo(pitTileFor(market));
+  void walkTo(room, pitTileFor(market));
 
   let decision: Decision;
   let engine = 'EV';
@@ -184,15 +183,26 @@ async function tick() {
   await execute(snap, decision, engine);
 }
 
-/** Open markets that have a floor pit or belong to a lobby. */
-function tradableMarkets() {
-  const lobbyMarkets = new Set([...conn.db.lobby.iter()].map(l => l.marketId));
+/** Rooms the whale is switched on in (and standing in) whose round is still open. */
+function activeRooms() {
+  return [...conn.db.lobby.iter()]
+    .filter(l => l.whaleEnabled && !l.roundOver && conn.db.whaleAvatar.lobbyId.find(l.lobbyId))
+    .sort((a, b) => (a.lobbyId < b.lobbyId ? -1 : 1));
+}
+
+/** A room's open markets: its central one, plus the class floor pits in class rooms (matches the server). */
+function roomMarkets(room: Lobby) {
   return [...conn.db.market.iter()]
-    .filter(m => m.status === 'OPEN' && (m.locationX >= 0 || lobbyMarkets.has(m.marketId)))
+    .filter(
+      m =>
+        m.status === 'OPEN' &&
+        (m.marketId === room.marketId ||
+          (room.isSolo ? m.lobbyId === room.lobbyId : m.lobbyId === 0n && m.locationX >= 0))
+    )
     .sort((a, b) => (a.marketId < b.marketId ? -1 : 1));
 }
 
-function snapshot(market: Market): Snapshot {
+function snapshot(room: Lobby, market: Market): Snapshot {
   const orders = [...conn.db.order.iter()].filter(o => o.marketId === market.marketId && o.quantity > 0);
   const level = (map: Map<number, number>, price: number, qty: number) => map.set(price, (map.get(price) ?? 0) + qty);
   const bidMap = new Map<number, number>();
@@ -213,6 +223,7 @@ function snapshot(market: Market): Snapshot {
     .sort((a, b) => Number(a.revealedAt.microsSinceUnixEpoch - b.revealedAt.microsSinceUnixEpoch));
 
   return {
+    room,
     market,
     clues,
     bestBid,
@@ -329,7 +340,7 @@ function evSniper(s: Snapshot): Decision {
 // --- Execution -------------------------------------------------------------------
 
 async function execute(s: Snapshot, d: Decision, engine: string) {
-  const tag = `[${engine}] ${s.market.question.slice(0, 48)}`;
+  const tag = `[${engine}] ${s.room.code} · ${s.market.question.slice(0, 40)}`;
   if (d.action === 'HOLD' || d.quantity <= 0) {
     log(`${tag} HOLD — ${d.reasoning}`);
     return;
@@ -372,17 +383,19 @@ function pitTileFor(m: Market) {
   return { x: randInt(CENTRAL_PIT.minX, CENTRAL_PIT.maxX), y: randInt(CENTRAL_PIT.minY, CENTRAL_PIT.maxY) };
 }
 
-async function wander() {
-  await walkTo({ x: randInt(2, GRID.cols - 3), y: randInt(2, GRID.rows - 3) });
+async function wander(room: Lobby) {
+  await walkTo(room, { x: randInt(2, GRID.cols - 3), y: randInt(2, GRID.rows - 3) });
 }
 
-/** Steps tile by tile so other clients animate a walk instead of a teleport. */
-async function walkTo(target: { x: number; y: number }) {
-  if (walking || !me) return;
-  walking = true;
+/** Steps tile by tile within a room so its clients animate a walk instead of a teleport. */
+async function walkTo(room: Lobby, target: { x: number; y: number }) {
+  const lobbyId = room.lobbyId;
+  if (walking.has(lobbyId) || !me) return;
+  walking.add(lobbyId);
   try {
     for (let i = 0; i < 40; i++) {
-      const p = conn.db.player.identity.find(me);
+      // Gone once the whale is switched off in this room.
+      const p = conn.db.whaleAvatar.lobbyId.find(lobbyId);
       if (!p) break;
       const dx = Math.sign(target.x - p.x);
       const dy = Math.sign(target.y - p.y);
@@ -391,13 +404,13 @@ async function walkTo(target: { x: number; y: number }) {
       const horizontal = dx !== 0 && (dy === 0 || Math.abs(target.x - p.x) >= Math.abs(target.y - p.y));
       const next = horizontal ? { x: p.x + dx, y: p.y } : { x: p.x, y: p.y + dy };
       const direction = horizontal ? (dx > 0 ? 'right' : 'left') : dy > 0 ? 'down' : 'up';
-      await conn.reducers.movePlayer({ ...next, direction });
+      await conn.reducers.whaleMove({ lobbyId, ...next, direction });
       await sleep(STEP_MS);
     }
   } catch (err) {
-    log('movePlayer failed:', errorText(err));
+    log(`whaleMove in ${room.code} failed:`, errorText(err));
   } finally {
-    walking = false;
+    walking.delete(lobbyId);
   }
 }
 

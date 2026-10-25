@@ -19,4 +19,5 @@ export default __t.row({
   y: __t.i32(),
   direction: __t.string(),
   tradeCount: __t.u32().name("trade_count"),
+  lobbyId: __t.u64().name("lobby_id"),
 });

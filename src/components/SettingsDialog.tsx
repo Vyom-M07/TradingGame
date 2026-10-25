@@ -1,35 +1,39 @@
 import { useState } from 'react';
 import { PixelDialog } from './Dialogs';
-import type { BotConfig, BotTrader, Player } from '../module_bindings/types';
+import type { BotTrader, Lobby } from '../module_bindings/types';
 
 export const BOT_SPEEDS = [600, 1000, 2000] as const;
 
-/** [BOTS] — put the robot traders on the floor when playing solo. */
+/** [BOTS] — the robot traders and the AI whale in the room you're in. */
 export function SettingsDialog({
   isOpen,
   onClose,
-  botConfig,
+  lobby,
+  canControl,
   bots,
-  whale,
+  whaleRunning,
   onSetBots,
 }: {
   isOpen: boolean;
   onClose: () => void;
-  botConfig: BotConfig | null;
+  lobby: Lobby | null;
+  /** Solo owners run their own room's bots; instructors run class rooms from the dashboard. */
+  canControl: boolean;
   bots: readonly BotTrader[];
-  whale: Player | null;
-  onSetBots: (enabled: boolean, tickMs: number) => Promise<unknown>;
+  /** The whale sidecar (npm run whale) is connected. */
+  whaleRunning: boolean;
+  onSetBots: (botsEnabled: boolean, whaleEnabled: boolean, tickMs: number) => Promise<unknown>;
 }) {
   const [error, setError] = useState('');
-  const enabled = !!botConfig?.ammEnabled;
-  const tickMs = botConfig?.tickMs ?? 1000;
-  const lockedByInstructor = enabled && botConfig?.controlledBy === 'INSTRUCTOR';
-  const whaleOnline = !!whale?.onFloor && botConfig?.whaleEnabled !== false;
+  const enabled = !!lobby?.botsEnabled;
+  const whaleOn = !!lobby?.whaleEnabled;
+  const tickMs = lobby?.botTickMs ?? 1000;
+  const locked = !canControl || !lobby;
 
-  const apply = async (nextEnabled: boolean, nextTickMs: number) => {
+  const apply = async (nextBots: boolean, nextWhale: boolean, nextTickMs: number) => {
     setError('');
     try {
-      await onSetBots(nextEnabled, nextTickMs);
+      await onSetBots(nextBots, nextWhale, nextTickMs);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -46,8 +50,8 @@ export function SettingsDialog({
             </div>
             <button
               className={`sign text-[9px] ${enabled ? 'sign-active' : ''}`}
-              disabled={lockedByInstructor}
-              onClick={() => void apply(!enabled, tickMs)}
+              disabled={locked}
+              onClick={() => void apply(!enabled, whaleOn, tickMs)}
             >
               {enabled ? 'ON' : 'OFF'}
             </button>
@@ -60,8 +64,8 @@ export function SettingsDialog({
                 <button
                   key={ms}
                   className={`sign !px-2 !py-1 text-[9px] ${tickMs === ms ? 'sign-active' : ''}`}
-                  disabled={lockedByInstructor}
-                  onClick={() => void apply(enabled, ms)}
+                  disabled={locked}
+                  onClick={() => void apply(enabled, whaleOn, ms)}
                 >
                   {ms < 1000 ? `${ms}ms` : `${ms / 1000}s`}
                 </button>
@@ -74,32 +78,33 @@ export function SettingsDialog({
               {bots.length} bots on the floor · {bots.reduce((n, b) => n + b.tradeCount, 0)} trades so far
             </div>
           )}
-
-          {lockedByInstructor && (
-            <div className="border-[3px] border-sky-600 bg-sky-50 p-2 text-[9px] text-sky-800">
-              Your instructor is running the bots for the whole class.
-            </div>
-          )}
-          {error && <div className="border-[3px] border-rose-600 bg-rose-50 p-2 text-[9px] text-rose-700">{error}</div>}
         </div>
 
         <div className="panel-inset flex items-center justify-between gap-3 p-3">
           <div>
-            <div>THE WHALE [AI]</div>
+            <div>WHALE AI</div>
             <div className="text-[8px] text-slate-500">
-              {whaleOnline ? 'Trading on the floor' : 'Start it with npm run whale'}
+              {!whaleRunning ? 'Offline: start it with npm run whale' : whaleOn ? 'Trading in this room' : 'Online, not in this room'}
             </div>
           </div>
-          <span className="flex items-center gap-2">
-            <span
-              className={`inline-block h-2.5 w-2.5 ${whaleOnline ? 'bg-amber-400' : 'bg-slate-400'} shadow-[0_0_0_2px_#1d1b2a]`}
-            />
-            {whaleOnline ? 'ONLINE' : 'OFFLINE'}
-          </span>
+          <button
+            className={`sign text-[9px] disabled:opacity-50 ${whaleOn ? 'sign-active' : ''}`}
+            disabled={locked || (!whaleOn && !whaleRunning)}
+            onClick={() => void apply(enabled, !whaleOn, tickMs)}
+          >
+            {whaleOn ? 'ON' : 'OFF'}
+          </button>
         </div>
 
+        {locked && lobby && (
+          <div className="border-[3px] border-sky-600 bg-sky-50 p-2 text-[9px] text-sky-800">
+            Your instructor runs the bots for this room.
+          </div>
+        )}
+        {error && <div className="border-[3px] border-rose-600 bg-rose-50 p-2 text-[9px] text-rose-700">{error}</div>}
+
         <p className="text-[9px] text-slate-500">
-          Bots stand around the open pits and trade on the house's account. Everyone on the floor sees them.
+          Bots stand around the open pits and trade on the house's account. Everyone in this room sees them.
         </p>
       </div>
     </PixelDialog>

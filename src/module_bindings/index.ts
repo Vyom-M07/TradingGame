@@ -41,8 +41,10 @@ import ClaimInstructorReducer from "./claim_instructor_reducer";
 import ClearCluesReducer from "./clear_clues_reducer";
 import CreateLobbyReducer from "./create_lobby_reducer";
 import CreateMarketReducer from "./create_market_reducer";
+import EndLobbyRoundReducer from "./end_lobby_round_reducer";
 import JoinGameReducer from "./join_game_reducer";
 import JoinLobbyReducer from "./join_lobby_reducer";
+import LeaveLobbyReducer from "./leave_lobby_reducer";
 import ModifyMarketReducer from "./modify_market_reducer";
 import MovePlayerReducer from "./move_player_reducer";
 import OptimalBotTickReducer from "./optimal_bot_tick_reducer";
@@ -52,13 +54,13 @@ import ResetLobbyBalancesReducer from "./reset_lobby_balances_reducer";
 import ResetMarketReducer from "./reset_market_reducer";
 import ResolveMarketReducer from "./resolve_market_reducer";
 import RevealClueReducer from "./reveal_clue_reducer";
-import SetBotConfigReducer from "./set_bot_config_reducer";
 import SetInstructorPasscodeReducer from "./set_instructor_passcode_reducer";
+import SetLobbyBotsReducer from "./set_lobby_bots_reducer";
 import SetPlayerRoleReducer from "./set_player_role_reducer";
-import SetSoloBotsReducer from "./set_solo_bots_reducer";
 import SetUsernameReducer from "./set_username_reducer";
-import StartNewRoundReducer from "./start_new_round_reducer";
-import TriggerEndRoundReducer from "./trigger_end_round_reducer";
+import StartLobbyRoundReducer from "./start_lobby_round_reducer";
+import StartSoloReducer from "./start_solo_reducer";
+import WhaleMoveReducer from "./whale_move_reducer";
 
 // Import all procedure arg schemas
 
@@ -75,6 +77,7 @@ import OrderRow from "./order_table";
 import PlayerRow from "./player_table";
 import PositionRow from "./position_table";
 import TradeRow from "./trade_table";
+import WhaleAvatarRow from "./whale_avatar_table";
 
 /** Type-only namespace exports for generated type groups. */
 
@@ -231,6 +234,17 @@ const tablesSchema = __schema({
       { name: 'trade_trade_id_key', constraint: 'unique', columns: ['tradeId'] },
     ],
   }, TradeRow),
+  whaleAvatar: __table({
+    name: 'whale_avatar',
+    indexes: [
+      { accessor: 'lobbyId', name: 'whale_avatar_lobby_id_idx_btree', algorithm: 'btree', columns: [
+        'lobbyId',
+      ] },
+    ],
+    constraints: [
+      { name: 'whale_avatar_lobby_id_key', constraint: 'unique', columns: ['lobbyId'] },
+    ],
+  }, WhaleAvatarRow),
   leaderboard: __table({
     name: 'leaderboard',
     indexes: [
@@ -249,8 +263,10 @@ const reducersSchema = __reducers(
   __reducerSchema("clear_clues", ClearCluesReducer),
   __reducerSchema("create_lobby", CreateLobbyReducer),
   __reducerSchema("create_market", CreateMarketReducer),
+  __reducerSchema("end_lobby_round", EndLobbyRoundReducer),
   __reducerSchema("join_game", JoinGameReducer),
   __reducerSchema("join_lobby", JoinLobbyReducer),
+  __reducerSchema("leave_lobby", LeaveLobbyReducer),
   __reducerSchema("modify_market", ModifyMarketReducer),
   __reducerSchema("move_player", MovePlayerReducer),
   __reducerSchema("optimal_bot_tick", OptimalBotTickReducer),
@@ -260,13 +276,13 @@ const reducersSchema = __reducers(
   __reducerSchema("reset_market", ResetMarketReducer),
   __reducerSchema("resolve_market", ResolveMarketReducer),
   __reducerSchema("reveal_clue", RevealClueReducer),
-  __reducerSchema("set_bot_config", SetBotConfigReducer),
   __reducerSchema("set_instructor_passcode", SetInstructorPasscodeReducer),
+  __reducerSchema("set_lobby_bots", SetLobbyBotsReducer),
   __reducerSchema("set_player_role", SetPlayerRoleReducer),
-  __reducerSchema("set_solo_bots", SetSoloBotsReducer),
   __reducerSchema("set_username", SetUsernameReducer),
-  __reducerSchema("start_new_round", StartNewRoundReducer),
-  __reducerSchema("trigger_end_round", TriggerEndRoundReducer),
+  __reducerSchema("start_lobby_round", StartLobbyRoundReducer),
+  __reducerSchema("start_solo", StartSoloReducer),
+  __reducerSchema("whale_move", WhaleMoveReducer),
 );
 
 /** The schema information for all procedures in this module. This is defined the same way as the procedures would have been defined in the server. */

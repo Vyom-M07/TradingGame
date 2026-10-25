@@ -25,4 +25,5 @@ export default __t.row({
   locationX: __t.i32().name("location_x"),
   locationY: __t.i32().name("location_y"),
   revision: __t.u32(),
+  lobbyId: __t.u64().name("lobby_id"),
 });

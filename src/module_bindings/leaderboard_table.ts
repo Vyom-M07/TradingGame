@@ -16,4 +16,7 @@ export default __t.row({
   cashCents: __t.u64().name("cash_cents"),
   holdingsCents: __t.u64().name("holdings_cents"),
   netWorthCents: __t.u64().name("net_worth_cents"),
+  lobbyId: __t.u64().name("lobby_id"),
+  isAi: __t.bool().name("is_ai"),
+  startingCents: __t.u64().name("starting_cents"),
 });

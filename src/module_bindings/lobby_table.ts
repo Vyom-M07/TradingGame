@@ -18,4 +18,9 @@ export default __t.row({
   marketId: __t.u64().name("market_id"),
   initialBalance: __t.u64().name("initial_balance"),
   createdAt: __t.timestamp().name("created_at"),
+  isSolo: __t.bool().name("is_solo"),
+  botsEnabled: __t.bool().name("bots_enabled"),
+  whaleEnabled: __t.bool().name("whale_enabled"),
+  botTickMs: __t.u32().name("bot_tick_ms"),
+  roundOver: __t.bool().name("round_over"),
 });

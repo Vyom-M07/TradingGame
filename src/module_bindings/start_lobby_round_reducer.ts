@@ -11,6 +11,5 @@ import {
 } from "spacetimedb";
 
 export default {
-  enabled: __t.bool(),
-  tickMs: __t.u32(),
+  lobbyId: __t.u64(),
 };

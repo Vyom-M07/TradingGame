@@ -1,223 +1,134 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
-import { Lobby, Market } from '../module_bindings/types';
+import { Lobby } from '../module_bindings/types';
 import { PixelDialog } from './Dialogs';
 
 interface LobbyModalProps {
   isOpen: boolean;
   onClose: () => void;
   activeLobby: Lobby | null;
-  allLobbies: readonly Lobby[];
-  markets: readonly Market[];
-  onSelectLobby: (lobby: Lobby) => void;
-  /** Lobby creation is instructor-only; omit to hide the Create tab. */
-  onCreateLobby?: (code: string, title: string, marketId: bigint, initialBalanceDollars: number) => Promise<void> | void;
+  /** The player owns this solo room, so they run its round. */
+  isRoomOwner: boolean;
+  onJoinCode: (code: string) => Promise<unknown>;
+  onPlaySolo: () => Promise<unknown>;
+  onLeave: () => Promise<unknown>;
+  onEndRound: () => Promise<unknown>;
+  onStartRound: () => Promise<unknown>;
 }
 
 const inputCls = 'panel-inset w-full px-3 py-2.5 text-[10px] outline-none focus:bg-white';
 
+/** The room you're in, its invite, and the way to another room or the menu. */
 export function LobbyModal({
   isOpen,
   onClose,
   activeLobby,
-  allLobbies,
-  markets,
-  onSelectLobby,
-  onCreateLobby,
+  isRoomOwner,
+  onJoinCode,
+  onPlaySolo,
+  onLeave,
+  onEndRound,
+  onStartRound,
 }: LobbyModalProps) {
-  const [activeTab, setActiveTab] = useState<'qr' | 'create' | 'list'>('qr');
   const [copied, setCopied] = useState(false);
-
-  // Create form state
-  const [newLobbyCode, setNewLobbyCode] = useState('');
-  const [newLobbyTitle, setNewLobbyTitle] = useState('');
-  const [selectedMarketId, setSelectedMarketId] = useState<bigint | null>(null);
-  const [initialBalance, setInitialBalance] = useState<number>(100);
-  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [code, setCode] = useState('');
+  const [busy, setBusy] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
 
-  useEffect(() => {
-    if (markets.length > 0 && selectedMarketId === null) {
-      setSelectedMarketId(markets[0].marketId);
-    }
-  }, [markets, selectedMarketId]);
+  const isSolo = !!activeLobby?.isSolo;
+  const inviteUrl =
+    activeLobby && !isSolo ? `${window.location.origin}${window.location.pathname}?lobby=${activeLobby.code}` : '';
 
-  const currentUrl = typeof window !== 'undefined'
-    ? `${window.location.origin}${window.location.pathname}?lobby=${activeLobby?.code || 'CAL13'}`
-    : '';
+  const act = async (call: () => Promise<unknown>, closeAfter = true) => {
+    setBusy(true);
+    setErrorMsg('');
+    try {
+      await call();
+      if (closeAfter) onClose();
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const handleCopyLink = () => {
-    if (navigator.clipboard && currentUrl) {
-      navigator.clipboard.writeText(currentUrl);
+    if (navigator.clipboard && inviteUrl) {
+      void navigator.clipboard.writeText(inviteUrl);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     }
   };
 
-  const handleCreate = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setErrorMsg('');
-    const cleanCode = newLobbyCode.trim().toUpperCase();
-    if (!cleanCode) {
-      setErrorMsg('Enter a lobby code (e.g. CAL13, ROOM1)');
-      return;
-    }
-    if (!selectedMarketId) {
-      setErrorMsg('Pick a market contract');
-      return;
-    }
-    if (!onCreateLobby) return;
-
-    try {
-      setIsSubmitting(true);
-      await onCreateLobby(
-        cleanCode,
-        newLobbyTitle.trim() || `${cleanCode} Trading Arena`,
-        selectedMarketId,
-        initialBalance
-      );
-      setActiveTab('qr');
-      setNewLobbyCode('');
-      setNewLobbyTitle('');
-    } catch (err: any) {
-      setErrorMsg(err?.message || 'Failed to create lobby');
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
-
-  const tabs: [typeof activeTab, string][] = [
-    ['qr', 'Invite'],
-    ...(onCreateLobby ? [['create', 'Create'] as [typeof activeTab, string]] : []),
-    ['list', `Rooms (${allLobbies.length})`],
-  ];
+  const cleanCode = code.trim().toUpperCase();
 
   return (
     <PixelDialog isOpen={isOpen} onClose={onClose} title="Lobby">
-      <div className="mb-4 flex gap-2">
-        {tabs.map(([id, label]) => (
-          <button
-            key={id}
-            onClick={() => setActiveTab(id)}
-            className={`sign flex-1 !px-2 text-[10px] ${activeTab === id ? 'sign-active' : ''}`}
-          >
-            {label}
-          </button>
-        ))}
-      </div>
+      <div className="space-y-5 text-[9px]">
+        <div className="text-center">
+          <div className="text-slate-500">{isSolo ? 'SOLO ROOM' : 'ROOM CODE'}</div>
+          <div className="mt-2 text-[24px] tracking-widest text-amber-600">{activeLobby?.code ?? '----'}</div>
+          <div className="mt-2 leading-relaxed">{activeLobby?.title}</div>
+          {activeLobby?.roundOver && <div className="mt-2 text-rose-600">ROUND OVER</div>}
+        </div>
 
-      {activeTab === 'qr' && (
-        <div className="flex flex-col items-center space-y-4 text-center">
-          <div>
-            <div className="text-[9px] text-slate-500">ROOM CODE</div>
-            <div className="mt-2 text-[24px] tracking-widest text-amber-600">{activeLobby?.code || 'CAL13'}</div>
-            <div className="mt-2 text-[9px] leading-relaxed">{activeLobby?.title || 'Cal Hacks 13.0 Main Arena'}</div>
-          </div>
-
-          <div className="panel-inset bg-white p-3">
-            <QRCodeSVG value={currentUrl || 'https://localhost:5173'} size={180} level="M" includeMargin={false} />
-          </div>
-
-          <div className="w-full space-y-2">
-            <p className="text-[9px] leading-relaxed text-slate-600">Scan with a phone camera or share the link:</p>
-            <div className="flex items-stretch gap-2">
-              <input type="text" readOnly value={currentUrl} className={`${inputCls} select-all !text-[8px]`} />
+        {inviteUrl && (
+          <div className="flex flex-col items-center space-y-3">
+            <div className="panel-inset bg-white p-3">
+              <QRCodeSVG value={inviteUrl} size={160} level="M" includeMargin={false} />
+            </div>
+            <div className="flex w-full items-stretch gap-2">
+              <input type="text" readOnly value={inviteUrl} className={`${inputCls} select-all !text-[8px]`} />
               <button onClick={handleCopyLink} className="sign !px-3 text-[10px]">
                 {copied ? 'Copied' : 'Copy'}
               </button>
             </div>
           </div>
-        </div>
-      )}
+        )}
 
-      {activeTab === 'create' && (
-        <form onSubmit={handleCreate} className="space-y-4 text-[9px]">
-          <label className="block space-y-2">
-            <span>LOBBY CODE</span>
+        {isRoomOwner && activeLobby && (
+          <button
+            className={`sign w-full text-[10px] disabled:opacity-50 ${activeLobby.roundOver ? 'sign-active' : '!bg-rose-300'}`}
+            disabled={busy}
+            onClick={() => void act(activeLobby.roundOver ? onStartRound : onEndRound)}
+          >
+            {activeLobby.roundOver ? 'Start new round' : 'End round & see results'}
+          </button>
+        )}
+
+        <form
+          className="space-y-2"
+          onSubmit={e => {
+            e.preventDefault();
+            if (cleanCode) void act(() => onJoinCode(cleanCode));
+          }}
+        >
+          <div className="text-slate-500">JOIN ANOTHER ROOM</div>
+          <div className="flex items-stretch gap-2">
             <input
-              type="text"
-              maxLength={10}
-              placeholder="ROOM1"
-              value={newLobbyCode}
-              onChange={e => setNewLobbyCode(e.target.value.toUpperCase())}
-              required
+              maxLength={16}
+              placeholder="ROOM CODE"
+              value={code}
+              onChange={e => setCode(e.target.value.toUpperCase())}
               className={`${inputCls} uppercase`}
             />
-          </label>
-
-          <label className="block space-y-2">
-            <span>ARENA TITLE</span>
-            <input
-              type="text"
-              placeholder="Econ 101 Trading Pit"
-              value={newLobbyTitle}
-              onChange={e => setNewLobbyTitle(e.target.value)}
-              className={inputCls}
-            />
-          </label>
-
-          <label className="block space-y-2">
-            <span>MARKET</span>
-            <select
-              value={selectedMarketId?.toString() || ''}
-              onChange={e => setSelectedMarketId(BigInt(e.target.value))}
-              className={inputCls}
-            >
-              {markets.map(m => (
-                <option key={m.marketId.toString()} value={m.marketId.toString()}>
-                  {m.question}
-                </option>
-              ))}
-            </select>
-          </label>
-
-          <label className="block space-y-2">
-            <span>STARTING CASH PER PLAYER ($)</span>
-            <input
-              type="number"
-              min={10}
-              max={10000}
-              step={10}
-              value={initialBalance}
-              onChange={e => setInitialBalance(Number(e.target.value))}
-              className={`${inputCls} !w-40`}
-            />
-          </label>
-
-          {errorMsg && <div className="border-[3px] border-rose-600 bg-rose-50 p-2 text-rose-700">{errorMsg}</div>}
-
-          <button type="submit" disabled={isSubmitting} className="sign sign-active w-full disabled:opacity-50">
-            {isSubmitting ? 'Creating...' : 'Launch Lobby'}
-          </button>
+            <button type="submit" disabled={busy || !cleanCode} className="sign sign-active !px-3 text-[10px] disabled:opacity-50">
+              Join
+            </button>
+          </div>
         </form>
-      )}
 
-      {activeTab === 'list' && (
-        <div className="space-y-3">
-          {allLobbies.map(l => {
-            const isSelected = activeLobby?.lobbyId === l.lobbyId;
-            return (
-              <button
-                key={l.lobbyId.toString()}
-                onClick={() => {
-                  onSelectLobby(l);
-                  setActiveTab('qr');
-                }}
-                className={`sign w-full !justify-between !py-3 text-left ${isSelected ? 'sign-active' : ''}`}
-              >
-                <span className="space-y-2">
-                  <span className="block text-[11px] text-amber-600">{l.code}</span>
-                  <span className="block max-w-[260px] overflow-hidden text-ellipsis text-[8px] text-slate-600">{l.title}</span>
-                </span>
-                <span className="text-right text-[9px]">
-                  <span className="block text-emerald-700">${(Number(l.initialBalance) / 100).toFixed(0)}</span>
-                  {isSelected && <span className="mt-2 block text-[8px] text-sky-700">ACTIVE</span>}
-                </span>
-              </button>
-            );
-          })}
+        <div className="grid grid-cols-2 gap-3">
+          <button className="sign text-[10px] disabled:opacity-50" disabled={busy || isSolo} onClick={() => void act(onPlaySolo)}>
+            Play solo
+          </button>
+          <button className="sign text-[10px] disabled:opacity-50" disabled={busy} onClick={() => void act(onLeave)}>
+            Leave to menu
+          </button>
         </div>
-      )}
+
+        {errorMsg && <div className="border-[3px] border-rose-600 bg-rose-50 p-2 text-rose-700">{errorMsg}</div>}
+      </div>
     </PixelDialog>
   );
 }

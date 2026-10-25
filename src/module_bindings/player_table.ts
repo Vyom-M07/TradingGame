@@ -21,4 +21,5 @@ export default __t.row({
   role: __t.string(),
   avatarType: __t.string().name("avatar_type"),
   onFloor: __t.bool().name("on_floor"),
+  lobbyId: __t.u64().name("lobby_id"),
 });

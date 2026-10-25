@@ -2,8 +2,8 @@ import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { AlertTriangle } from 'lucide-react';
 import { useReducer } from 'spacetimedb/react';
 import { reducers } from '../module_bindings';
-import type { BotConfig, Clue, GameState, LeaderboardEntry, Lobby, Market, Order, Player } from '../module_bindings/types';
-import { formatCents, rankLeaderboard } from '../components/RoundOverlays';
+import type { Clue, GameState, LeaderboardEntry, Lobby, Market, Order, Player } from '../module_bindings/types';
+import { formatCents } from '../components/RoundOverlays';
 
 /** Runs a reducer call and reports the outcome in the dashboard toast. */
 export type Run = (label: string, call: () => Promise<unknown>) => Promise<boolean>;
@@ -52,24 +52,26 @@ function useConfirm(timeoutMs = 3500) {
 
 // --- Round control -------------------------------------------------------------
 
-export function RoundControl({ gameState, run, studentCount }: { gameState: GameState | null; run: Run; studentCount: number }) {
-  const endRound = useReducer(reducers.triggerEndRound);
-  const newRound = useReducer(reducers.startNewRound);
+export function RoundControl({ lobby, run, studentCount }: { lobby: Lobby | null; run: Run; studentCount: number }) {
+  const endRound = useReducer(reducers.endLobbyRound);
+  const newRound = useReducer(reducers.startLobbyRound);
   const { armed, confirm } = useConfirm();
-  const revealed = !!gameState?.isLeaderboardRevealed;
+  const revealed = !!lobby?.roundOver;
+  if (!lobby) return null;
+  const lobbyId = lobby.lobbyId;
 
   if (revealed) {
     return (
       <div className="panel flex flex-wrap items-center justify-between gap-4 bg-amber-100 p-5">
         <div>
-          <div className="text-[14px]">ROUND OVER</div>
+          <div className="text-[14px]">ROUND OVER · {lobby.code}</div>
           <div className="mt-2 text-[9px] leading-relaxed text-slate-600">
             Students are frozen on the final podium and trading is closed.
           </div>
         </div>
         <button
           className="sign sign-active !px-6 !py-4 text-[13px]"
-          onClick={() => run('New round started', () => newRound())}
+          onClick={() => run('New round started', () => newRound({ lobbyId }))}
         >
           Start New Round
         </button>
@@ -80,12 +82,12 @@ export function RoundControl({ gameState, run, studentCount }: { gameState: Game
   const isArmed = armed === 'end';
   return (
     <button
-      onClick={() => confirm('end', () => void run('Round ended — leaderboard revealed', () => endRound()))}
+      onClick={() => confirm('end', () => void run('Round ended — leaderboard revealed', () => endRound({ lobbyId })))}
       className={`group relative w-full border-4 border-ink px-6 py-7 text-white shadow-[inset_-6px_-6px_0_rgba(0,0,0,0.25),8px_8px_0_rgba(0,0,0,0.4)] transition-transform active:translate-y-1 ${
         isArmed ? 'animate-pulse bg-rose-700' : 'bg-rose-600 hover:bg-rose-500'
       }`}
     >
-      <div className="text-[22px] tracking-wide sm:text-[28px]">{isArmed ? 'CLICK AGAIN TO CONFIRM' : 'END ROUND'}</div>
+      <div className="text-[22px] tracking-wide sm:text-[28px]">{isArmed ? 'CLICK AGAIN TO CONFIRM' : `END ROUND · ${lobby.code}`}</div>
       <div className="mt-3 text-[9px] text-rose-100">
         Closes trading, freezes the floor and reveals the leaderboard to {studentCount} student{studentCount === 1 ? '' : 's'}
       </div>
@@ -95,8 +97,14 @@ export function RoundControl({ gameState, run, studentCount }: { gameState: Game
 
 // --- Leaderboard ---------------------------------------------------------------
 
-export function LeaderboardPanel({ rows, startingCents }: { rows: readonly LeaderboardEntry[]; startingCents: bigint }) {
-  const ranked = useMemo(() => rankLeaderboard(rows), [rows]);
+const pnlOf = (r: LeaderboardEntry) => Number(r.netWorthCents) - Number(r.startingCents);
+
+/** Ranked by P&L, so the whale's $5,000 bankroll doesn't put it on top by default. */
+export function LeaderboardPanel({ rows }: { rows: readonly LeaderboardEntry[] }) {
+  const ranked = useMemo(
+    () => [...rows].sort((a, b) => pnlOf(b) - pnlOf(a) || a.username.localeCompare(b.username)),
+    [rows]
+  );
   return (
     <Section
       title="Live Leaderboard"
@@ -122,12 +130,13 @@ export function LeaderboardPanel({ rows, startingCents }: { rows: readonly Leade
             </thead>
             <tbody>
               {ranked.map((r, i) => {
-                const pnl = Number(r.netWorthCents) - Number(startingCents);
+                const pnl = pnlOf(r);
                 return (
                   <tr key={r.identity.toHexString()} className={`border-b-2 border-slate-200 ${i < 3 ? 'bg-amber-50' : ''}`}>
                     <td className="py-2.5 pr-2">{['🥇', '🥈', '🥉'][i] ?? i + 1}</td>
                     <td className="max-w-[160px] truncate py-2.5 pr-2" title={r.username}>
                       {r.username}
+                      {r.isAi && <span className="ml-2 bg-amber-300 px-1 text-[7px]">AI</span>}
                     </td>
                     <td className="py-2.5 pr-2 text-right">{formatCents(r.cashCents)}</td>
                     <td className="py-2.5 pr-2 text-right">{formatCents(r.holdingsCents)}</td>
@@ -144,7 +153,8 @@ export function LeaderboardPanel({ rows, startingCents }: { rows: readonly Leade
         </div>
       )}
       <div className="mt-3 text-[7px] leading-relaxed text-slate-500">
-        Net worth = cash + cash locked in open orders + positions valued at the order-book mid price.
+        Net worth = cash + cash locked in open orders + positions valued at the order-book mid price. P&L is measured from
+        each trader's starting cash ($5,000 for the whale).
       </div>
     </Section>
   );
@@ -667,23 +677,22 @@ export function ClassroomPanel({
   lobbies,
   activeLobby,
   markets,
-  players,
+  studentCount,
   onSelectLobby,
-  botConfig,
   whale,
   run,
 }: {
   lobbies: readonly Lobby[];
   activeLobby: Lobby | null;
   markets: readonly Market[];
-  players: readonly Player[];
+  studentCount: number;
   onSelectLobby: (code: string) => void;
-  botConfig: BotConfig | null;
+  /** The running whale sidecar, if any. */
   whale: Player | null;
   run: Run;
 }) {
   const resetBalances = useReducer(reducers.resetLobbyBalances);
-  const setBotConfig = useReducer(reducers.setBotConfig);
+  const setLobbyBots = useReducer(reducers.setLobbyBots);
   const createLobby = useReducer(reducers.createLobby);
   const setPasscode = useReducer(reducers.setInstructorPasscode);
   const { armed, confirm } = useConfirm();
@@ -694,10 +703,9 @@ export function ClassroomPanel({
   const [copied, setCopied] = useState(false);
 
   const joinUrl = activeLobby ? `${window.location.origin}/?lobby=${activeLobby.code}` : '';
-  const students = players.filter(p => p.role !== 'INSTRUCTOR').length;
 
   return (
-    <Section title="Classroom" accent="bg-violet-400" right={<span className="text-[8px] text-slate-500">{students} STUDENTS</span>}>
+    <Section title="Classroom" accent="bg-violet-400" right={<span className="text-[8px] text-slate-500">{studentCount} STUDENTS</span>}>
       <div className="space-y-5 text-[9px]">
         <div className="space-y-2">
           <div className="text-slate-500">ACTIVE LOBBY</div>
@@ -724,7 +732,7 @@ export function ClassroomPanel({
           <div className="truncate text-[7px] text-slate-500">{joinUrl}</div>
         </div>
 
-        <BotControls botConfig={botConfig} whale={whale} run={run} setBotConfig={setBotConfig} />
+        {activeLobby && <BotControls lobby={activeLobby} whale={whale} run={run} setLobbyBots={setLobbyBots} />}
 
         <div className="grid grid-cols-2 gap-3">
           <button
@@ -792,35 +800,43 @@ export function ClassroomPanel({
 
 const BOT_SPEEDS = [600, 1000, 2000];
 
-/** One switch for the robot traders and the AI whale across every open pit. */
+/** The robot traders and the AI whale in the selected room. */
 function BotControls({
-  botConfig,
+  lobby,
   whale,
   run,
-  setBotConfig,
+  setLobbyBots,
 }: {
-  botConfig: BotConfig | null;
+  lobby: Lobby;
   whale: Player | null;
   run: Run;
-  setBotConfig: (args: { ammEnabled: boolean; whaleEnabled: boolean; tickMs: number }) => Promise<unknown>;
+  setLobbyBots: (args: { lobbyId: bigint; botsEnabled: boolean; whaleEnabled: boolean; tickMs: number }) => Promise<unknown>;
 }) {
-  const amm = botConfig?.ammEnabled ?? false;
-  const whaleOn = botConfig?.whaleEnabled ?? true;
-  const tickMs = botConfig?.tickMs ?? 1000;
-  const allOn = amm && whaleOn;
-  const save = (label: string, next: { ammEnabled: boolean; whaleEnabled: boolean; tickMs: number }) =>
-    void run(label, () => setBotConfig(next));
+  const amm = lobby.botsEnabled;
+  const whaleOn = lobby.whaleEnabled;
+  const tickMs = lobby.botTickMs;
+  // The server refuses to switch the whale on while its process is down.
+  const whaleAvailable = !!whale || whaleOn;
+  const allOn = amm && (whaleOn || !whaleAvailable);
+  const save = (label: string, next: { botsEnabled: boolean; whaleEnabled: boolean; tickMs: number }) =>
+    void run(label, () => setLobbyBots({ lobbyId: lobby.lobbyId, ...next }));
 
   return (
     <div className="panel-inset space-y-3 p-3">
       <div className="flex items-center justify-between gap-3">
         <div>
           <div>AI WHALE &amp; MARKET MAKERS</div>
-          <div className="text-[7px] text-slate-500">Runs on the server for every open pit</div>
+          <div className="text-[7px] text-slate-500">Runs on the server for {lobby.code}'s central pit and floor pits</div>
         </div>
         <button
           className={`sign text-[9px] ${allOn ? 'sign-active' : ''}`}
-          onClick={() => save(allOn ? 'Bots stopped' : 'Bots started', { ammEnabled: !allOn, whaleEnabled: !allOn, tickMs })}
+          onClick={() =>
+            save(allOn ? 'Bots stopped' : 'Bots started', {
+              botsEnabled: !allOn,
+              whaleEnabled: !allOn && !!whale,
+              tickMs,
+            })
+          }
         >
           {allOn ? 'ON' : amm || whaleOn ? 'PARTIAL' : 'OFF'}
         </button>
@@ -828,13 +844,15 @@ function BotControls({
       <div className="flex flex-wrap items-center gap-2 text-[8px]">
         <button
           className={`sign !px-2 !py-1 text-[8px] ${amm ? 'sign-active' : ''}`}
-          onClick={() => save(amm ? 'Robot traders off' : 'Robot traders on', { ammEnabled: !amm, whaleEnabled: whaleOn, tickMs })}
+          onClick={() => save(amm ? 'Robot traders off' : 'Robot traders on', { botsEnabled: !amm, whaleEnabled: whaleOn, tickMs })}
         >
           BOTS {amm ? 'ON' : 'OFF'}
         </button>
         <button
-          className={`sign !px-2 !py-1 text-[8px] ${whaleOn ? 'sign-active' : ''}`}
-          onClick={() => save(whaleOn ? 'Whale paused' : 'Whale trading', { ammEnabled: amm, whaleEnabled: !whaleOn, tickMs })}
+          className={`sign !px-2 !py-1 text-[8px] disabled:opacity-40 ${whaleOn ? 'sign-active' : ''}`}
+          disabled={!whaleAvailable}
+          title={whaleAvailable ? undefined : 'Start the whale with npm run whale'}
+          onClick={() => save(whaleOn ? 'Whale off' : 'Whale trading', { botsEnabled: amm, whaleEnabled: !whaleOn, tickMs })}
         >
           WHALE {whaleOn ? 'ON' : 'OFF'}
         </button>
@@ -843,7 +861,7 @@ function BotControls({
             <button
               key={ms}
               className={`sign !px-2 !py-1 text-[8px] ${tickMs === ms ? 'sign-active' : ''}`}
-              onClick={() => save(`Bot speed ${ms}ms`, { ammEnabled: amm, whaleEnabled: whaleOn, tickMs: ms })}
+              onClick={() => save(`Bot speed ${ms}ms`, { botsEnabled: amm, whaleEnabled: whaleOn, tickMs: ms })}
             >
               {ms < 1000 ? `${ms}ms` : `${ms / 1000}s`}
             </button>
@@ -851,7 +869,7 @@ function BotControls({
         </span>
       </div>
       <div className="text-[7px] text-slate-500">
-        Whale sidecar: {whale?.onFloor ? `online as ${whale.username}` : 'offline (npm run whale)'}
+        Whale sidecar: {whale ? `online as ${whale.username}` : 'offline (npm run whale)'}
       </div>
     </div>
   );

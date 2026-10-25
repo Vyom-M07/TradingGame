@@ -2,20 +2,26 @@ import { useEffect, useMemo, useState } from 'react';
 import type { Player } from '../module_bindings/types';
 import { AVATARS, SELECTABLE_AVATARS, avatarTypeFor, type AvatarType } from '../game/assets';
 
+/** Where the player goes after login: a room by code, or their own solo room. */
+export type RoomChoice = { kind: 'code'; code: string } | { kind: 'solo' };
+
 interface LoginScreenProps {
   connected: boolean;
   ready: boolean;
   players: readonly Player[];
   me: Player | null;
-  onJoin: (name: string, avatarType: AvatarType) => Promise<void>;
+  /** Pre-filled room code, e.g. from ?lobby= */
+  initialCode: string;
+  onJoin: (name: string, avatarType: AvatarType, room: RoomChoice) => Promise<void>;
 }
 
 // Server-assigned placeholder names aren't worth pre-filling.
 const isPlaceholderName = (name: string) => /^Trader_[0-9a-f]{6}$/.test(name);
 
-/** Shown before Phaser boots: pick a unique name and an avatar. */
-export function LoginScreen({ connected, ready, players, me, onJoin }: LoginScreenProps) {
+/** Shown before Phaser boots: pick a unique name and an avatar, then a room. */
+export function LoginScreen({ connected, ready, players, me, initialCode, onJoin }: LoginScreenProps) {
   const [name, setName] = useState('');
+  const [code, setCode] = useState(initialCode);
   const [avatar, setAvatar] = useState<AvatarType>('trader');
   const [prefilled, setPrefilled] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -41,18 +47,24 @@ export function LoginScreen({ connected, ready, players, me, onJoin }: LoginScre
   const status = !trimmed ? '' : !lengthOk ? '2-24 characters' : taken ? 'Name already taken' : 'Available';
   const canJoin = connected && ready && lengthOk && !taken && !busy;
 
-  const submit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const cleanCode = code.trim().toUpperCase();
+
+  const enter = async (room: RoomChoice) => {
     if (!canJoin) return;
     setBusy(true);
     setError('');
     try {
-      await onJoin(trimmed, avatar);
+      await onJoin(trimmed, avatar, room);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setBusy(false);
     }
+  };
+
+  const submit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (cleanCode) void enter({ kind: 'code', code: cleanCode });
   };
 
   return (
@@ -93,9 +105,37 @@ export function LoginScreen({ connected, ready, players, me, onJoin }: LoginScre
 
           {error && <div className="border-[3px] border-rose-600 bg-rose-50 p-2 leading-relaxed text-rose-700">{error}</div>}
 
-          <button type="submit" disabled={!canJoin} className="sign sign-active w-full !py-4 text-[13px] disabled:opacity-50">
-            {!connected || !ready ? 'Connecting…' : busy ? 'Entering…' : 'Enter the Floor'}
-          </button>
+          {!connected || !ready ? (
+            <div className="sign w-full !py-4 text-[13px] opacity-50">Connecting…</div>
+          ) : (
+            <div className="space-y-3">
+              <div className="text-slate-500">JOIN YOUR CLASS</div>
+              <div className="flex items-stretch gap-2">
+                <input
+                  maxLength={16}
+                  value={code}
+                  onChange={e => {
+                    setCode(e.target.value.toUpperCase());
+                    setError('');
+                  }}
+                  placeholder="ROOM CODE"
+                  className="panel-inset w-full px-3 py-3 text-[13px] uppercase outline-none focus:bg-white"
+                />
+                <button type="submit" disabled={!canJoin || !cleanCode} className="sign sign-active !px-4 text-[11px] disabled:opacity-50">
+                  {busy ? '…' : 'Join with code'}
+                </button>
+              </div>
+              <div className="text-center text-slate-500">— OR —</div>
+              <button
+                type="button"
+                disabled={!canJoin}
+                onClick={() => void enter({ kind: 'solo' })}
+                className="sign w-full !py-4 text-[13px] disabled:opacity-50"
+              >
+                {busy ? 'Entering…' : 'Play solo'}
+              </button>
+            </div>
+          )}
         </form>
       </div>
     </div>

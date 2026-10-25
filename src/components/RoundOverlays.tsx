@@ -43,12 +43,15 @@ export function LeaderboardReveal({
   avatarFor,
   hidden,
   onToggleHidden,
+  onStartRound,
 }: {
   rows: readonly LeaderboardEntry[];
   myIdentityHex: string;
   avatarFor: (identityHex: string) => AvatarType;
   hidden: boolean;
   onToggleHidden: () => void;
+  /** Solo rooms: the owner reopens trading themselves. */
+  onStartRound?: () => void;
 }) {
   const ranked = useMemo(() => rankLeaderboard(rows), [rows]);
   const myIndex = ranked.findIndex(r => r.identity.toHexString() === myIdentityHex);
@@ -132,7 +135,12 @@ export function LeaderboardReveal({
           )}
         </div>
 
-        <div className="border-t-4 border-ink px-5 py-3 text-right">
+        <div className="flex justify-end gap-3 border-t-4 border-ink px-5 py-3">
+          {onStartRound && (
+            <button className="sign sign-active text-[10px]" onClick={onStartRound}>
+              Start new round
+            </button>
+          )}
           <button className="sign text-[10px]" onClick={onToggleHidden}>
             Hide
           </button>

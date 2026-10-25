@@ -45,7 +45,7 @@ export const AVATARS: Record<AvatarType, { label: string; dir: string; canvas: n
   trader: { label: 'Serious Trader #1', dir: '/assets/player', canvas: 32, selectable: true, robotic: false },
   businesswoman: { label: 'Serious Trader #2', dir: '/assets/businesswoman', canvas: 40, selectable: true, robotic: false },
   robot: { label: 'Market Maker Bot', dir: '/assets/robot', canvas: 32, selectable: false, robotic: true },
-  whale: { label: 'The Whale [AI]', dir: '/assets/whale', canvas: 32, selectable: false, robotic: true },
+  whale: { label: 'Whale AI', dir: '/assets/whale', canvas: 32, selectable: false, robotic: true },
 };
 
 export const AVATAR_TYPES = Object.keys(AVATARS) as AvatarType[];
