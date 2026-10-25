@@ -5,4 +5,7 @@ dist
 .DS_Store
 
 spacetime.local.json
-.env.*
+.env
+.env.local
+.env.development
+.env.production
