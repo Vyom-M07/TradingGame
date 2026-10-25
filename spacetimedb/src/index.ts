@@ -348,19 +348,29 @@ function resetWallet(ctx: Ctx, identity: Identity, cashCents: bigint) {
   if (p) ctx.db.player.identity.update({ ...p, cashBalance: cashCents });
 }
 
-/** Validates a display name and rejects one already used by another player (case-insensitive). */
-function assertUniqueName(ctx: Ctx, name: string) {
+/** Validates a display name's length. Uniqueness is per class room (assertNameFreeInRoom). */
+function cleanName(name: string) {
   const trimmed = name.trim();
   if (trimmed.length < 2 || trimmed.length > 24) {
     throw new SenderError('Name must be between 2 and 24 characters');
   }
-  const lower = trimmed.toLowerCase();
+  return trimmed;
+}
+
+/**
+ * Class rooms need distinct names among the players on their floor right now
+ * (case-insensitive). Solo rooms, and players who've left, been kicked or gone
+ * idle, don't count.
+ */
+function assertNameFreeInRoom(ctx: Ctx, l: LobbyRow, name: string) {
+  if (l.isSolo) return;
+  const lower = name.toLowerCase();
   for (const other of ctx.db.player.iter()) {
-    if (!other.identity.equals(ctx.sender) && other.username.toLowerCase() === lower) {
-      throw new SenderError(`The name "${trimmed}" is already taken`);
+    if (other.identity.equals(ctx.sender) || other.lobbyId !== l.lobbyId || !other.onFloor) continue;
+    if (other.username.toLowerCase() === lower) {
+      throw new SenderError(`The name "${name}" is already taken in ${l.code}`);
     }
   }
-  return trimmed;
 }
 
 function cancelDisconnectTimers(ctx: Ctx, identity: Identity) {
@@ -810,16 +820,19 @@ export const removeIdleAvatar = spacetimedb.reducer(
 // REDUCERS
 // -----------------------------------------------------------------------------
 
-/** Login: claim a unique name, pick an avatar and step onto the floor. */
+/** Login: pick a name and an avatar and step onto the floor. Names are checked per class room. */
 export const joinGame = spacetimedb.reducer(
   { name: t.string(), avatarType: t.string() },
   (ctx, { name, avatarType }) => {
-    const username = assertUniqueName(ctx, name);
+    const username = cleanName(name);
     if (!AVATAR_TYPES.includes(avatarType)) throw new SenderError('Unknown avatar');
     if (ctx.db.player.identity.find(ctx.sender)?.avatarType === WHALE_AVATAR) {
       throw new SenderError('The whale joins with registerWhale');
     }
     const p = getOrCreatePlayer(ctx);
+    // Still in a class room from before (e.g. a refresh): the new name must be free there.
+    const current = ctx.db.lobby.lobbyId.find(p.lobbyId);
+    if (current) assertNameFreeInRoom(ctx, current, username);
     cancelDisconnectTimers(ctx, ctx.sender);
     ctx.db.player.identity.update({
       ...p,
@@ -837,8 +850,10 @@ export const joinGame = spacetimedb.reducer(
 export const setUsername = spacetimedb.reducer(
   { username: t.string() },
   (ctx, { username }) => {
-    const trimmed = assertUniqueName(ctx, username);
+    const trimmed = cleanName(username);
     const p = getOrCreatePlayer(ctx);
+    const current = ctx.db.lobby.lobbyId.find(p.lobbyId);
+    if (current) assertNameFreeInRoom(ctx, current, trimmed);
     ctx.db.player.identity.update({ ...p, username: trimmed });
   }
 );
@@ -990,6 +1005,7 @@ export const createLobby = spacetimedb.reducer(
 function enterRoom(ctx: Ctx, l: LobbyRow) {
   let p = getOrCreatePlayer(ctx);
   if (isWhale(p)) throw new SenderError('The whale is switched on per room, not joined');
+  assertNameFreeInRoom(ctx, l, p.username);
 
   // A different room than the one whose wallet we carry: start over with this
   // room's bankroll. Returning to the same room (refresh, menu, kick) keeps it.

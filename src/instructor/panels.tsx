@@ -99,7 +99,16 @@ export function RoundControl({ lobby, run, studentCount }: { lobby: Lobby | null
 // --- Leaderboard ---------------------------------------------------------------
 
 /** Ranked by P&L, so the whale's $5,000 bankroll doesn't put it on top by default. */
-export function LeaderboardPanel({ rows, run }: { rows: readonly LeaderboardEntry[]; run: Run }) {
+export function LeaderboardPanel({
+  rows,
+  offline,
+  run,
+}: {
+  rows: readonly LeaderboardEntry[];
+  /** Identities (hex) whose avatar left the floor after 2 minutes disconnected; they stay ranked. */
+  offline: ReadonlySet<string>;
+  run: Run;
+}) {
   const kickPlayer = useReducer(reducers.kickPlayer);
   const { armed, confirm } = useConfirm();
   const ranked = useMemo(
@@ -144,6 +153,11 @@ export function LeaderboardPanel({ rows, run }: { rows: readonly LeaderboardEntr
                         <span className="ml-2 bg-sky-300 px-1 text-[7px]">BOT</span>
                       ) : (
                         r.isAi && <span className="ml-2 bg-amber-300 px-1 text-[7px]">AI</span>
+                      )}
+                      {!r.isAi && offline.has(r.identity.toHexString()) && (
+                        <span className="ml-2 bg-slate-300 px-1 text-[7px]" title="Disconnected for over 2 minutes; still ranked">
+                          OFFLINE
+                        </span>
                       )}
                     </td>
                     <td className="py-2.5 pr-2 text-right">{formatCents(r.cashCents)}</td>

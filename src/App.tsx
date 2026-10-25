@@ -358,6 +358,7 @@ export default function App() {
         connected={connected}
         ready={playersReady}
         players={players}
+        lobbies={lobbies}
         me={currentPlayer}
         initialCode={URL_LOBBY_CODE}
         onJoin={handleJoin}

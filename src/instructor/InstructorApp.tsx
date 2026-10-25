@@ -42,6 +42,10 @@ export default function InstructorApp() {
     () => leaderboard.filter(r => r.lobbyId === activeLobby?.lobbyId),
     [leaderboard, activeLobby?.lobbyId]
   );
+  const offline = useMemo(
+    () => new Set(players.filter(p => !p.onFloor).map(p => p.identity.toHexString())),
+    [players]
+  );
   // The whale sidecar's player row; onFloor means the process is running.
   const whale = players.find(p => p.avatarType === 'whale' && p.onFloor) ?? null;
 
@@ -131,7 +135,7 @@ export default function InstructorApp() {
 
         <div className="grid gap-5 lg:grid-cols-12">
           <div className="lg:col-span-7">
-            <LeaderboardPanel rows={roomRows} run={run} />
+            <LeaderboardPanel rows={roomRows} offline={offline} run={run} />
           </div>
           <div className="space-y-5 lg:col-span-5">
             <AlertPanel gameState={gameState} run={run} />

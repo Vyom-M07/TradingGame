@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import type { Player } from '../module_bindings/types';
+import type { Lobby, Player } from '../module_bindings/types';
 import { AVATARS, SELECTABLE_AVATARS, avatarTypeFor, type AvatarType } from '../game/assets';
 
 /** Where the player goes after login: a room by code, or their own solo room. */
@@ -9,6 +9,7 @@ interface LoginScreenProps {
   connected: boolean;
   ready: boolean;
   players: readonly Player[];
+  lobbies: readonly Lobby[];
   me: Player | null;
   /** Pre-filled room code, e.g. from ?lobby= */
   initialCode: string;
@@ -18,8 +19,8 @@ interface LoginScreenProps {
 // Server-assigned placeholder names aren't worth pre-filling.
 const isPlaceholderName = (name: string) => /^Trader_[0-9a-f]{6}$/.test(name);
 
-/** Shown before Phaser boots: pick a unique name and an avatar, then a room. */
-export function LoginScreen({ connected, ready, players, me, initialCode, onJoin }: LoginScreenProps) {
+/** Shown before Phaser boots: pick a name and an avatar, then a room. */
+export function LoginScreen({ connected, ready, players, lobbies, me, initialCode, onJoin }: LoginScreenProps) {
   const [name, setName] = useState('');
   const [code, setCode] = useState(initialCode);
   const [avatar, setAvatar] = useState<AvatarType>('trader');
@@ -38,16 +39,32 @@ export function LoginScreen({ connected, ready, players, me, initialCode, onJoin
 
   const trimmed = name.trim();
   const myHex = me?.identity.toHexString();
-  const taken = useMemo(() => {
+  const cleanCode = code.trim().toUpperCase();
+
+  // Names only need to be unique among the players on a class room's floor
+  // right now (matches the server); solo never checks.
+  const classRoom = useMemo(() => lobbies.find(l => l.code === cleanCode && !l.isSolo) ?? null, [lobbies, cleanCode]);
+  const takenInRoom = useMemo(() => {
+    if (!classRoom) return false;
     const lower = trimmed.toLowerCase();
-    return players.some(p => p.identity.toHexString() !== myHex && p.username.toLowerCase() === lower);
-  }, [players, trimmed, myHex]);
+    return players.some(
+      p =>
+        p.identity.toHexString() !== myHex &&
+        p.lobbyId === classRoom.lobbyId &&
+        p.onFloor &&
+        p.username.toLowerCase() === lower
+    );
+  }, [players, classRoom, trimmed, myHex]);
 
   const lengthOk = trimmed.length >= 2 && trimmed.length <= 24;
-  const status = !trimmed ? '' : !lengthOk ? '2-24 characters' : taken ? 'Name already taken' : 'Available';
-  const canJoin = connected && ready && lengthOk && !taken && !busy;
-
-  const cleanCode = code.trim().toUpperCase();
+  const status = !trimmed
+    ? ''
+    : !lengthOk
+      ? '2-24 characters'
+      : takenInRoom
+        ? `Name already taken in ${classRoom!.code}`
+        : 'Available';
+  const canJoin = connected && ready && lengthOk && !busy;
 
   const enter = async (room: RoomChoice) => {
     if (!canJoin) return;
@@ -64,7 +81,7 @@ export function LoginScreen({ connected, ready, players, me, initialCode, onJoin
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (cleanCode) void enter({ kind: 'code', code: cleanCode });
+    if (cleanCode && !takenInRoom) void enter({ kind: 'code', code: cleanCode });
   };
 
   return (
@@ -133,7 +150,11 @@ export function LoginScreen({ connected, ready, players, me, initialCode, onJoin
                   placeholder="ROOM CODE"
                   className="panel-inset w-full px-3 py-3 text-[13px] uppercase outline-none focus:bg-white"
                 />
-                <button type="submit" disabled={!canJoin || !cleanCode} className="sign sign-active !px-4 text-[11px] disabled:opacity-50">
+                <button
+                  type="submit"
+                  disabled={!canJoin || !cleanCode || takenInRoom}
+                  className="sign sign-active !px-4 text-[11px] disabled:opacity-50"
+                >
                   {busy ? '…' : 'Join with code'}
                 </button>
               </div>
