@@ -166,6 +166,7 @@ export const Player = __t.object("Player", {
   avatarType: __t.string(),
   onFloor: __t.bool(),
   lobbyId: __t.u64(),
+  lastLobbyId: __t.u64(),
 });
 export type Player = __Infer<typeof Player>;
 

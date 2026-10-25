@@ -277,17 +277,23 @@ export default function App() {
     window.history.replaceState(null, '', url);
   }, [currentPlayer, activeLobby, joined]);
 
-  // Sent back to the menu without pressing Leave: an instructor kicked us.
+  // Sent back to the menu without pressing Leave: an instructor kicked us or closed the room.
   const leavingRef = useRef(false);
   const lastLobbyId = useRef<bigint | null>(null);
   useEffect(() => {
     const lobbyId = currentPlayer?.lobbyId ?? null;
-    if (lastLobbyId.current && lobbyId === 0n && !leavingRef.current) {
+    const left = lastLobbyId.current;
+    if (left && lobbyId === 0n && !leavingRef.current) {
+      const closed = !lobbies.some(l => l.lobbyId === left);
       setIsPitOverlayOpen(false);
-      setBreaking({ message: 'You were removed from the room by the instructor.', key: `kick-${Date.now()}` });
+      setBreaking({
+        message: closed ? 'The instructor closed this room.' : 'You were removed from the room by the instructor.',
+        key: `kick-${Date.now()}`,
+      });
     }
     if (lobbyId !== 0n) leavingRef.current = false;
     lastLobbyId.current = lobbyId;
+    // Runs only when our room changes; `lobbies` from the same update tells kicked from closed.
   }, [currentPlayer?.lobbyId]);
 
   // Round end: freeze the floor and close the terminal.

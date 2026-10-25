@@ -41,6 +41,7 @@ import ClaimInstructorReducer from "./claim_instructor_reducer";
 import ClearCluesReducer from "./clear_clues_reducer";
 import CreateLobbyReducer from "./create_lobby_reducer";
 import CreateMarketReducer from "./create_market_reducer";
+import DeleteLobbyReducer from "./delete_lobby_reducer";
 import EndLobbyRoundReducer from "./end_lobby_round_reducer";
 import JoinGameReducer from "./join_game_reducer";
 import JoinLobbyReducer from "./join_lobby_reducer";
@@ -265,6 +266,7 @@ const reducersSchema = __reducers(
   __reducerSchema("clear_clues", ClearCluesReducer),
   __reducerSchema("create_lobby", CreateLobbyReducer),
   __reducerSchema("create_market", CreateMarketReducer),
+  __reducerSchema("delete_lobby", DeleteLobbyReducer),
   __reducerSchema("end_lobby_round", EndLobbyRoundReducer),
   __reducerSchema("join_game", JoinGameReducer),
   __reducerSchema("join_lobby", JoinLobbyReducer),

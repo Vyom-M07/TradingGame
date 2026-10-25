@@ -29,6 +29,9 @@ const player = table(
     onFloor: t.bool().default(false),
     // Room the player is in; 0 = back at the menu.
     lobbyId: t.u64().default(0n),
+    // Room whose wallet the player is carrying (kept while at the menu). Entering
+    // any other room starts a fresh wallet; coming back to this one keeps it.
+    lastLobbyId: t.u64().default(0n),
   }
 );
 
@@ -322,9 +325,27 @@ function getOrCreatePlayer(ctx: Ctx) {
       avatarType: 'trader',
       onFloor: false,
       lobbyId: 0n,
+      lastLobbyId: 0n,
     });
   }
   return p;
+}
+
+function startingCentsFor(l: LobbyRow) {
+  return l.initialBalance > 0n ? l.initialBalance : DEFAULT_BALANCE;
+}
+
+/** Fresh start for one player: the given cash, no positions, no resting orders. */
+function resetWallet(ctx: Ctx, identity: Identity, cashCents: bigint) {
+  for (const pos of [...ctx.db.position.by_owner_market.filter(identity)]) {
+    if (pos.yesShares !== 0 || pos.noShares !== 0) ctx.db.position.positionId.update({ ...pos, yesShares: 0, noShares: 0 });
+  }
+  // Escrow isn't refunded: the cash is being replaced outright.
+  for (const o of [...ctx.db.order.owner.filter(identity)]) {
+    if (!o.isBot) ctx.db.order.orderId.delete(o.orderId);
+  }
+  const p = ctx.db.player.identity.find(identity);
+  if (p) ctx.db.player.identity.update({ ...p, cashBalance: cashCents });
 }
 
 /** Validates a display name and rejects one already used by another player (case-insensitive). */
@@ -970,19 +991,12 @@ function enterRoom(ctx: Ctx, l: LobbyRow) {
   let p = getOrCreatePlayer(ctx);
   if (isWhale(p)) throw new SenderError('The whale is switched on per room, not joined');
 
-  const existing = [...ctx.db.lobbyParticipant.by_lobby_player.filter([l.lobbyId, ctx.sender])];
-  if (existing.length === 0) {
-    // Starting cash is granted once per player, not per lobby, so hopping to
-    // a new lobby can't refill a spent bankroll.
-    const joinedBefore = [...ctx.db.lobbyParticipant.iter()].some(part => part.player.equals(ctx.sender));
-    if (!joinedBefore) {
-      const startingCents = l.initialBalance > 0n ? l.initialBalance : 10_000n;
-      ctx.db.player.identity.update({
-        ...p,
-        cashBalance: startingCents,
-      });
-    }
+  // A different room than the one whose wallet we carry: start over with this
+  // room's bankroll. Returning to the same room (refresh, menu, kick) keeps it.
+  const carrying = p.lobbyId !== 0n ? p.lobbyId : p.lastLobbyId;
+  if (carrying !== l.lobbyId) resetWallet(ctx, ctx.sender, startingCentsFor(l));
 
+  if ([...ctx.db.lobbyParticipant.by_lobby_player.filter([l.lobbyId, ctx.sender])].length === 0) {
     ctx.db.lobbyParticipant.insert({
       participantId: 0n,
       lobbyId: l.lobbyId,
@@ -992,8 +1006,16 @@ function enterRoom(ctx: Ctx, l: LobbyRow) {
   }
 
   p = ctx.db.player.identity.find(ctx.sender)!;
-  if (p.lobbyId !== l.lobbyId) {
-    ctx.db.player.identity.update({ ...p, lobbyId: l.lobbyId, x: SPAWN.x, y: SPAWN.y, direction: 'down' });
+  if (p.lobbyId !== l.lobbyId || p.lastLobbyId !== l.lobbyId) {
+    const moved = p.lobbyId !== l.lobbyId;
+    ctx.db.player.identity.update({
+      ...p,
+      lobbyId: l.lobbyId,
+      lastLobbyId: l.lobbyId,
+      x: moved ? SPAWN.x : p.x,
+      y: moved ? SPAWN.y : p.y,
+      direction: moved ? 'down' : p.direction,
+    });
   }
 }
 
@@ -1062,19 +1084,11 @@ export const resetLobbyBalances = spacetimedb.reducer(
     if (!l) throw new SenderError(`Lobby '${cleanCode}' not found`);
     requireInstructor(ctx);
 
-    // Fresh start: starting cash, no positions, no resting orders.
-    const startingCents = l.initialBalance > 0n ? l.initialBalance : 10_000n;
-    for (const part of ctx.db.lobbyParticipant.iter()) {
-      if (part.lobbyId !== l.lobbyId) continue;
-      const playerRec = ctx.db.player.identity.find(part.player);
-      if (!playerRec || playerRec.role === 'INSTRUCTOR') continue;
-      ctx.db.player.identity.update({ ...playerRec, cashBalance: startingCents });
-      for (const pos of [...ctx.db.position.by_owner_market.filter(part.player)]) {
-        ctx.db.position.positionId.update({ ...pos, yesShares: 0, noShares: 0 });
-      }
-      for (const o of [...ctx.db.order.owner.filter(part.player)]) {
-        if (!o.isBot) ctx.db.order.orderId.delete(o.orderId);
-      }
+    // Fresh start for everyone carrying this room's wallet (in it, or out at the menu).
+    for (const p of [...ctx.db.player.iter()]) {
+      if (p.role === 'INSTRUCTOR' || isWhale(p)) continue;
+      const carrying = p.lobbyId !== 0n ? p.lobbyId : p.lastLobbyId;
+      if (carrying === l.lobbyId) resetWallet(ctx, p.identity, startingCentsFor(l));
     }
   }
 );
@@ -1902,6 +1916,35 @@ export const kickPlayer = spacetimedb.reducer(
     if (!p || p.lobbyId !== lobbyId) throw new SenderError('That player is not in this room');
     if (p.role === 'INSTRUCTOR') throw new SenderError('Instructors cannot be kicked');
     ctx.db.player.identity.update({ ...p, lobbyId: 0n });
+  }
+);
+
+/**
+ * Close a class room for good (Instructor only): everyone in it goes back to
+ * the menu, its bots and whale leave, and the room's code becomes free again.
+ * Markets live on the class floor and are left alone.
+ */
+export const deleteLobby = spacetimedb.reducer(
+  { lobbyId: t.u64() },
+  (ctx, { lobbyId }) => {
+    requireInstructor(ctx);
+    const l = requireLobby(ctx, lobbyId);
+    if (l.isSolo) throw new SenderError("Solo rooms belong to their student");
+
+    for (const p of [...ctx.db.player.iter()]) {
+      if (p.lobbyId === lobbyId) ctx.db.player.identity.update({ ...p, lobbyId: 0n });
+    }
+    removeWhaleFromRoom(ctx, l);
+    for (const timer of [...ctx.db.botTimer.iter()]) {
+      if (timer.lobbyId === lobbyId) ctx.db.botTimer.scheduledId.delete(timer.scheduledId);
+    }
+    for (const b of [...ctx.db.botTrader.iter()]) {
+      if (b.lobbyId === lobbyId) ctx.db.botTrader.botId.delete(b.botId);
+    }
+    for (const part of [...ctx.db.lobbyParticipant.iter()]) {
+      if (part.lobbyId === lobbyId) ctx.db.lobbyParticipant.participantId.delete(part.participantId);
+    }
+    ctx.db.lobby.lobbyId.delete(lobbyId);
   }
 );
 

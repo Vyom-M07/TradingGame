@@ -717,6 +717,7 @@ export function ClassroomPanel({
   run: Run;
 }) {
   const resetBalances = useReducer(reducers.resetLobbyBalances);
+  const deleteLobby = useReducer(reducers.deleteLobby);
   const setLobbyBots = useReducer(reducers.setLobbyBots);
   const createLobby = useReducer(reducers.createLobby);
   const setPasscode = useReducer(reducers.setInstructorPasscode);
@@ -769,6 +770,19 @@ export function ClassroomPanel({
             }
           >
             {armed === 'reset' ? 'Confirm reset?' : 'Reset balances'}
+          </button>
+          <button
+            className={`sign text-[9px] ${armed === 'delete' ? 'animate-pulse !bg-rose-600 text-white' : '!bg-rose-200'}`}
+            disabled={!activeLobby}
+            title="Close this room: everyone in it goes back to the menu"
+            onClick={() =>
+              activeLobby &&
+              confirm('delete', () =>
+                void run(`Lobby ${activeLobby.code} deleted`, () => deleteLobby({ lobbyId: activeLobby.lobbyId }))
+              )
+            }
+          >
+            {armed === 'delete' ? `Delete ${activeLobby?.code}?` : 'Delete lobby'}
           </button>
         </div>
 
